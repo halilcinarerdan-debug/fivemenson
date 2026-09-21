@@ -2821,6 +2821,91 @@ exports('GetFrontBusinessAuditState', function(zoneId)
 end)
 
 
+-- Aynı EvaluateAudit'in (yukarıda) eşik-taraması KISA bir kopyası -- bilinçli
+-- olarak KÜÇÜK bir tekrar: EvaluateAudit "günlük fatura hacmi" sinyalinden
+-- beslenir, bu ise "ölü ajanın çözülen sırrı" (matrix_forensic_evidence'ta
+-- karartılmamış/mühürlü kanıt) sinyalinden -- iki BAĞIMSIZ kaynak, TEK bir
+-- audit_score/warning_level durumunu besliyor.
+function Matrix.FrontBusiness.ApplyRetroactiveAuditWarning(zoneId, reasonText)
+    local state = GetFrontBusinessState(zoneId)
+    if state.is_wiped then return end
+
+    state.audit_score = Matrix.Clamp(state.audit_score + Config.FrontBusiness.RetroactiveAuditWarningBump, 0.0, 1.0)
+    dirtyAuditState[zoneId] = true
+
+    local newWarningLevel = state.warning_level
+    for i, threshold in ipairs(Config.FrontBusiness.AuditWarningThresholds) do
+        if state.audit_score >= threshold then newWarningLevel = i end
+    end
+    if newWarningLevel > state.warning_level then
+        Matrix.Log('BUREAU', '[FAZ2][GERIYE DONUK DENETIM UYARISI] Isletme #%d (%s) -- %s -- uyari seviyesi %d -> %d (skor:%.3f).',
+            zoneId, state.business_label, tostring(reasonText), state.warning_level, newWarningLevel, state.audit_score)
+    end
+    state.warning_level = newWarningLevel
+
+    if state.audit_score >= 1.0 then
+        Matrix.FrontBusiness.ExecuteWipe(zoneId)
+    end
+end
+
+
+-- =====================================================================
+-- ★★★ [FAZ 2] KRİMİNAL SIR: ÖLÜ AJAN OTOPSİSİ ★★★
+-- TAMAMEN YENİ bir EKLEMEDİR. server/logistics.lua Matrix.Logistics.
+-- OnDealerEliminated'in (artık HARD-DELETE YAPMIYOR, bkz. o dosyanın
+-- güncellenmiş yorumu) her BAŞARILI ölümünde çağırdığı, ASENKRON (Wait ile
+-- geciken, ayrı bir CreateThread içinde çalışan -- master ticker'ı asla
+-- bloklamaz) bir "otopsi" fonksiyonudur.
+--
+-- SIR: bota ait DNA kimliğinin (fingerprint_id) matrix_forensic_evidence'ta
+-- HÂLÂ MÜHÜRLÜ (sealed_as_crime_weapon=1) bir kaydı var mı? Varsa, ajan
+-- ölmeden önce /namludegistir (Matrix.Forensics.WipeBallisticRecord,
+-- DEĞİŞTİRİLMEDİ) ile izlerini KARARTMAMIŞ demektir -- Büro cesedi
+-- incelediğinde bu mühürlü kanıttan trap house'un paravan işletmesine
+-- (server/market.lua Matrix.Inspector.GetZoneForTrapHouse, DEĞİŞTİRİLMEDİ,
+-- coğrafi eşleme YENİDEN kullanılır) geriye dönük bir federal Audit Warning
+-- (bkz. yukarıdaki ApplyRetroactiveAuditWarning) fırlatır.
+-- SIFIR RNG: saf bir COUNT(*) > 0 kontrolüdür.
+-- =====================================================================
+function Matrix.Bureau.InvestigateDeadAgentSecret(botId, dnaId, trapHouseId, cause)
+    if type(dnaId) ~= 'string' or dnaId == '' then return end
+
+    CreateThread(function()
+        Wait(CfgBureau('DeadAgentAutopsyDelaySeconds', 120) * 1000)
+
+        local ok, rows = pcall(function()
+            return MySQL.query.await(
+                'SELECT COUNT(*) AS n FROM matrix_forensic_evidence WHERE fingerprint_id = ? AND sealed_as_crime_weapon = 1',
+                { dnaId }
+            )
+        end)
+        local unwipedSealedCount = (ok and rows and rows[1] and tonumber(rows[1].n)) or 0
+
+        if unwipedSealedCount <= 0 then
+            Matrix.Log('BUREAU',
+                '[FAZ2][KRIMINAL SIR GUVENDE] Bot #%d (DNA:%s, sebep:%s) olumunden sonra Buro hicbir muhurlu/karartilmamis kanit bulamadi.',
+                botId, dnaId, tostring(cause))
+            return
+        end
+
+        Matrix.Log('BUREAU',
+            '[FAZ2][KRIMINAL SIR COZULDU] Bot #%d (DNA:%s, sebep:%s) olumunden sonra %d MUHURLU/KARARTILMAMIS kanit bulundu -- izler ORTAYA CIKTI.',
+            botId, dnaId, tostring(cause), unwipedSealedCount)
+
+        local zoneId = trapHouseId and Matrix.Inspector and Matrix.Inspector.GetZoneForTrapHouse
+            and Matrix.Inspector.GetZoneForTrapHouse(trapHouseId)
+        if zoneId and Matrix.FrontBusiness and Matrix.FrontBusiness.ApplyRetroactiveAuditWarning then
+            Matrix.FrontBusiness.ApplyRetroactiveAuditWarning(zoneId,
+                ('dead_agent_secret: Bot #%d, DNA:%s, %d muhurlu kanit'):format(botId, dnaId, unwipedSealedCount))
+        end
+    end)
+end
+
+exports('InvestigateDeadAgentSecret', function(botId, dnaId, trapHouseId, cause)
+    return Matrix.Bureau.InvestigateDeadAgentSecret(botId, dnaId, trapHouseId, cause)
+end)
+
+
 -- =====================================================================
 -- ★★★ [FAZ 2] KATMAN 3: ON-DEMAND DISPATCH TAARRUZİ SİNYAL KAYBI
 -- (FAIL-SAFE PROTOCOL) ★★★

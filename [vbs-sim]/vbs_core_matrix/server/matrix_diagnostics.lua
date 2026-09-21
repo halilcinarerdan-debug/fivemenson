@@ -245,6 +245,25 @@ AddCheck('Bureau.GetEffectiveSnitchThreshold botId olmadan geriye donuk uyumlu',
     return threshold >= Config.Kitchen.SnitchThreshold, ('esik=%.3f'):format(threshold)
 end)
 
+-- ★ [FAZ 2] KALICI ÖLÜM (ADLİ ZİNCİR KORUMASI) regresyon korumaları
+AddCheck('kanca mevcut: Matrix.Bureau.InvestigateDeadAgentSecret', function()
+    return type(Matrix.Bureau) == 'table' and type(Matrix.Bureau.InvestigateDeadAgentSecret) == 'function', 'kanca'
+end)
+AddCheck('kanca mevcut: Matrix.FrontBusiness.ApplyRetroactiveAuditWarning', function()
+    return type(Matrix.FrontBusiness) == 'table' and type(Matrix.FrontBusiness.ApplyRetroactiveAuditWarning) == 'function', 'kanca'
+end)
+AddCheck('kanca mevcut: Matrix.Logistics.OnDealerEliminated', function()
+    return type(Matrix.Logistics) == 'table' and type(Matrix.Logistics.OnDealerEliminated) == 'function', 'kanca'
+end)
+AddCheck('Config.Bureau.DeadAgentAutopsyDelaySeconds gecerli', function()
+    local d = Config.Bureau.DeadAgentAutopsyDelaySeconds
+    return type(d) == 'number' and d > 0, tostring(d)
+end)
+AddCheck('Config.FrontBusiness.RetroactiveAuditWarningBump gecerli', function()
+    local b = Config.FrontBusiness.RetroactiveAuditWarningBump
+    return type(b) == 'number' and b > 0 and b <= 1.0, tostring(b)
+end)
+
 -- Matrix.Clamp SIFIR RNG'nin en temel taşı -- iki ayrı çağrının BYTE-BYTE
 -- aynı sonucu verdiğini kanıtlamak, "deterministik DNA"nın kendisini
 -- test eder (formülleri değil, o formüllerin ÜZERİNE oturduğu primitifi).
@@ -324,15 +343,18 @@ local DbChecks = {
     { 'matrix_bureau_learning_core tablosu mevcut', function() return TableExists('matrix_bureau_learning_core'), 'sql/layer7_faz1.sql' end },
     { 'matrix_district_hubs tablosu mevcut', function() return TableExists('matrix_district_hubs'), 'sql/layer7_faz1.sql' end },
     { 'matrix_zone_ledger.dirty_cash_pool kolonu mevcut (FAZ2 migration)', function()
-        return ColumnExists('matrix_zone_ledger', 'dirty_cash_pool'), 'sql/layer7_faz4_front_business.sql calistirildi mi?'
+        return ColumnExists('matrix_zone_ledger', 'dirty_cash_pool'), 'sql/matrix_financial_core.sql calistirildi mi?'
     end },
     { 'matrix_bots.accounting_precision kolonu mevcut (FAZ2 migration)', function()
-        return ColumnExists('matrix_bots', 'accounting_precision'), 'sql/layer7_faz5_mercenary.sql calistirildi mi?'
+        return ColumnExists('matrix_bots', 'accounting_precision'), 'sql/matrix_financial_core.sql calistirildi mi?'
     end },
     { 'matrix_zone_inspectors.is_wiped kolonu mevcut (FAZ2 migration)', function()
-        return ColumnExists('matrix_zone_inspectors', 'is_wiped'), 'sql/layer7_faz5_mercenary.sql calistirildi mi?'
+        return ColumnExists('matrix_zone_inspectors', 'is_wiped'), 'sql/matrix_financial_core.sql calistirildi mi?'
     end },
-    { 'matrix_purchase_logs tablosu mevcut', function() return TableExists('matrix_purchase_logs'), 'sql/layer7_faz5_mercenary.sql' end }
+    { 'matrix_purchase_logs tablosu mevcut', function() return TableExists('matrix_purchase_logs'), 'sql/matrix_financial_core.sql' end },
+    { 'matrix_customer_pool.is_dead kolonu mevcut (FAZ2 sema)', function()
+        return ColumnExists('matrix_customer_pool', 'is_dead'), 'sql/matrix_financial_core.sql calistirildi mi?'
+    end }
 }
 
 -- ---------------------------------------------------------------------

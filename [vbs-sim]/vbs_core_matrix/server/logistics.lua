@@ -835,6 +835,19 @@ end)
 -- =====================================================================
 -- KALICI ÖLÜM (PERMADEATH & HARD-DELETE)
 -- =====================================================================
+-- ★ [FAZ 2][ADLİ ZİNCİR KORUMASI] KALICI ÖLÜM ARTIK HARD-DELETE DEĞİLDİR.
+-- Bir ajan öldüğünde matrix_bots satırı ASLA silinmez -- Matrix.RemoveBot
+-- (server/main.lua, DEĞİŞTİRİLMEDİ) çağrılarak status='deceased' olarak
+-- UPSERT edilir. Bu değer matrix_bots.status ENUM'unda ZATEN VARDI
+-- ('active','burned','deceased','retired') -- yalnızca hiçbir zaman
+-- YAZILMIYORDU. Matrix.LoadBots (main.lua) yalnızca status='active'
+-- satırlarını RAM'e yükler -- yani 'deceased' bir bot ASLA yeniden
+-- canlandırılamaz/lojistiğe sevk edilemez (RAM'e hiç girmez), ama satırın
+-- KENDİSİ (ve ona bağlı matrix_touch_log/matrix_forensic_evidence/
+-- matrix_ballistic_weapons/matrix_snitch_events -- hepsi AYRI tablolar,
+-- dna_id/ballistic_id/bot_id ile referanslı) kalıcı olarak korunur -- zaten
+-- bu tablolar hiçbir zaman bot_id'ye bağlı bir CASCADE DELETE taşımıyordu,
+-- yalnızca matrix_bots'un KENDİSİ siliniyordu, o da artık silinmiyor.
 function Matrix.Logistics.OnDealerEliminated(botId, cause)
     local bot = Matrix.Bots[botId]
     if not bot then return false end
@@ -844,14 +857,16 @@ function Matrix.Logistics.OnDealerEliminated(botId, cause)
         local dispatch = Matrix.Dispatches[botId]
         local plate = dispatch.plate
         if plate then Matrix.Logistics.ReleaseVehicleLock(plate) end
-        if Matrix.DespawnDispatchEntity then Matrix.DespawnDispatchEntity(botId, dispatch) end
-        Matrix.Dispatches[botId] = nil
+        -- ★ Despawn/Dispatches[botId]=nil artık AŞAĞIDAKİ Matrix.RemoveBot'a
+        -- devredilir (o da AYNI Matrix.Dispatches[id] kontrolünü yapıyor) --
+        -- çift despawn YAPILMAZ, tek sorumluluk noktası.
     end
 
 
     local plateToSeize = PermanentVehicleByBot[botId]
     local lastCoords = bot.state.coords
     local dnaId = bot.dna_id
+    local trapHouseId = bot.state.trap_house_id
 
 
     if bot.state.spawned then
@@ -859,16 +874,23 @@ function Matrix.Logistics.OnDealerEliminated(botId, cause)
     end
 
 
-    MySQL.prepare('DELETE FROM matrix_bots WHERE id = ?', { botId })
-
-
-    Matrix.Persistence.dirtyBots[botId] = nil
-    Matrix.Bots[botId] = nil
+    Matrix.RemoveBot(botId, 'deceased')
 
 
     Matrix.Log('LOGISTICS',
-        '[LOJISTIK KAYIP: DEALER_ID %d KALICI OLARAK DE-REGISTRE EDILDI] Sebep:%s',
+        '[LOJISTIK KAYIP: DEALER_ID %d KALICI OLARAK OLU (deceased) ISARETLENDI -- ADLI KAYIT KORUNDU] Sebep:%s',
         botId, tostring(cause or 'unknown'))
+
+
+    -- ★ [FAZ 2] KRİMİNAL SIR: server/bureau.lua Matrix.Bureau.
+    -- InvestigateDeadAgentSecret (asenkron, DEĞİŞTİRİLMEMİŞ dosyalarda hiç
+    -- çağrılmaz -- guard'lı, hook yoksa davranış BİREBİR ESKİSİ GİBİDİR).
+    if Matrix.Bureau and Matrix.Bureau.InvestigateDeadAgentSecret then
+        local ok, err = pcall(Matrix.Bureau.InvestigateDeadAgentSecret, botId, dnaId, trapHouseId, cause)
+        if not ok then
+            Matrix.Log('LOGISTICS', '[HATA][FAZ2] InvestigateDeadAgentSecret cagrisi basarisiz (yutuldu): %s', tostring(err))
+        end
+    end
 
 
     if plateToSeize then

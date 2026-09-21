@@ -101,6 +101,14 @@ CREATE TABLE IF NOT EXISTS `matrix_bots` (
     `dna_id`                     VARCHAR(64)  NOT NULL,
     `name`                       VARCHAR(100) NOT NULL,
     `role`                       VARCHAR(32)  NOT NULL DEFAULT 'runner',
+    -- ★ [FAZ 2][ADLİ ZİNCİR KORUMASI] 'deceased' -- KALICI ÖLÜM durumu.
+    -- server/logistics.lua Matrix.Logistics.OnDealerEliminated ARTIK bu
+    -- satırı ASLA SİLMEZ, yalnızca status='deceased' yazar (Matrix.RemoveBot
+    -- üzerinden). Matrix.LoadBots (server/main.lua) yalnızca status='active'
+    -- satırlarını RAM'e yükler -- 'deceased' bir bot bir daha ASLA lojistiğe
+    -- sevk edilemez/canlandırılamaz, ama satırın kendisi (ve ona bağlı
+    -- matrix_touch_log/matrix_forensic_evidence/matrix_ballistic_weapons/
+    -- matrix_snitch_events kayıtları) kalıcı olarak korunur.
     `status`                     ENUM('active','burned','deceased','retired') NOT NULL DEFAULT 'active',
     `fear_factor`                FLOAT        NOT NULL DEFAULT 0.0,
     `resilience`                 FLOAT        NOT NULL DEFAULT 0.5,
@@ -194,6 +202,13 @@ CREATE TABLE IF NOT EXISTS `matrix_touch_log` (
 CREATE TABLE IF NOT EXISTS `matrix_customer_pool` (
     `citizenid`                  VARCHAR(50)  NOT NULL,
     `name`                       VARCHAR(100) NOT NULL,
+    -- ★ [FAZ 2] Şema-tutarlılık kolonu (talep: "matrix_customer_pool'u da
+    -- is_dead mantığına göre güncelle"). DÜRÜST NOT: matrix_customer_pool
+    -- GERÇEK OYUNCU citizenid'lerini tutar (bot DEĞİL) -- bu projede
+    -- kalıcı oyuncu ölümü/permadeath mekaniği YOKTUR, bu yüzden şu an
+    -- HİÇBİR kod bu kolonu OKUMAZ/YAZMAZ. Yalnızca gelecekteki bir
+    -- permadeath entegrasyonu için hazır, zararsız bir varsayılan (0) taşır.
+    `is_dead`                    TINYINT(1)   NOT NULL DEFAULT 0,
     `police_encounters_nearby`   INT          NOT NULL DEFAULT 0,
     `completed_deals`            INT          NOT NULL DEFAULT 0,
     `times_reported`             INT          NOT NULL DEFAULT 0,
@@ -1107,6 +1122,20 @@ ALTER TABLE `matrix_zone_inspectors`
         AFTER `warning_level`;
 
 -- =====================================================================
+-- ★★★ [FAZ 2] KALICI ÖLÜM (ADLİ ZİNCİR KORUMASI) -- SAVUNMACI ALTER ★★★
+-- Yukarıdaki `matrix_customer_pool` CREATE TABLE tanımı `is_dead` kolonunu
+-- ZATEN içerir (yeni/temiz kurulumlar için) -- CREATE TABLE IF NOT EXISTS
+-- bir tablo ZATEN VARSA hiçbir şey yapmaz. Bu dosya daha önce (bu kolon
+-- eklenmeden ÖNCE) bir veritabanına çalıştırılmış olabileceğinden, aşağıdaki
+-- ADD COLUMN IF NOT EXISTS o durumda da kolonu güvenle ekler -- iki durumda
+-- da (temiz kurulum veya yeniden çalıştırma) nihai şema AYNIDIR.
+-- =====================================================================
+ALTER TABLE `matrix_customer_pool`
+    ADD COLUMN IF NOT EXISTS `is_dead` TINYINT(1) NOT NULL DEFAULT 0
+        COMMENT 'Sema-tutarlilik kolonu -- su an hicbir kod okumaz/yazmaz (bkz. CREATE TABLE yorumu)'
+        AFTER `name`;
+
+-- =====================================================================
 -- DOĞRULAMA SORGUSU (opsiyonel)
 -- =====================================================================
 -- SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
@@ -1115,5 +1144,8 @@ ALTER TABLE `matrix_zone_inspectors`
 -- SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
 -- WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'matrix_zone_inspectors'
 --   AND COLUMN_NAME IN ('audit_score','warning_level','is_wiped');
+-- SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+-- WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'matrix_customer_pool'
+--   AND COLUMN_NAME = 'is_dead';
 
 

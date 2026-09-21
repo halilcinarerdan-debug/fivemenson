@@ -1100,7 +1100,16 @@ Config.FrontBusiness = {
 
     -- auditScore bu eşikleri (sırayla) GEÇTİKÇE warning_level 1/2/3'e yükselir.
     -- 3. eşiğin (0.90) ÜSTÜNDE, auditScore 1.0'a ulaştığı AN Mali Wipe tetiklenir.
-    AuditWarningThresholds = { 0.34, 0.67, 0.90 }
+    AuditWarningThresholds = { 0.34, 0.67, 0.90 },
+
+    -- ---------------------------------------------------------------------
+    -- KATMAN 4 KÖPRÜSÜ: KRİMİNAL SIR -- GERİYE DÖNÜK DENETİM UYARISI
+    -- server/bureau.lua Matrix.FrontBusiness.ApplyRetroactiveAuditWarning bu
+    -- sabiti okur. AuditWarningThresholds[1] (0.34) İLE AYNI büyüklükte TEK
+    -- bir sıçrama -- "ölü ajanın sırrı çözüldü" tek bir uyarı seviyesi
+    -- atlatır, yeni bir ölçek İCAT EDİLMEZ.
+    -- ---------------------------------------------------------------------
+    RetroactiveAuditWarningBump = 0.34
 }
 
 -- =====================================================================
@@ -1160,5 +1169,15 @@ Config.Mercenary = {
     -- DÜŞÜRÜR -- dopamin düşüşü, kırılma direncini hassaslaştırır.
     WarnSnitchSensitivityBonus = 0.08
 }
+
+-- =====================================================================
+-- KALICI ÖLÜM (ADLİ ZİNCİR KORUMASI) -- KRİMİNAL SIR OTOPSİSİ
+-- server/logistics.lua Matrix.Logistics.OnDealerEliminated (ARTIK
+-- matrix_bots satırını SİLMEZ, yalnızca status='deceased' işaretler -- bu
+-- değer matrix_bots.status ENUM'unda ZATEN VAR OLAN bir değerdi, hiç
+-- kullanılmıyordu) ölen ajanı server/bureau.lua Matrix.Bureau.
+-- InvestigateDeadAgentSecret'a asenkron olarak bildirir.
+-- =====================================================================
+Config.Bureau.DeadAgentAutopsyDelaySeconds = 120  -- Büro'nun cesedi/kanıt odasını incelemesi için GERÇEK gecikme (RNG YOK, sabit)
 
 return Config
