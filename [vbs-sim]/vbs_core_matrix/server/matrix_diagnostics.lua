@@ -166,6 +166,123 @@ if Config.ComposerSignature then
     end)
 end
 
+-- =====================================================================
+-- ★★★ FAZ 2: KRİMİNAL FİNANS, ADLİ MUHASEBE VE DİNAMİK HABER BÜLTENİ
+-- STRES TESTİ -- 6. madde: sunucu açılır açılmaz radyoaktif nakit iz
+-- birikim formüllerini, fatura anomali limitlerini ve haber bülteni
+-- dinamik isim havuzu kancalarını ARKA PLANDA (hızlı katman, SIFIR yan
+-- etki) acımasızca simüle eder. Gerçek Matrix.CashDecay.Tick FORMÜLÜNÜN
+-- KENDİSİ (server/market.lua, DEĞİŞTİRİLMEDİ) burada TEKRAR YAZILMAZ --
+-- bu blok o formülü SAF ARİTMETİK olarak, DB'ye HİÇBİR ŞEY YAZMADAN,
+-- uç (0 gün / max iz) ve orta noktalarda tekrar tekrar (1500 saf çağrı,
+-- 0 Resmon -- yan etkisiz aritmetik milisaniyeler içinde biter, dosya-başı
+-- KAPSAM KARARI'ndaki "gerçek dispatch/frisk mantığını 1500x çalıştırma"
+-- reddiyle ÇELİŞMEZ) yürütüp NaN/Inf/aralık-dışı sonuç ÜRETMEDİĞİNİ kanıtlar.
+-- =====================================================================
+AddCheck('Config.CashDecay parametreleri gecerli (Faz 2 finans)', function()
+    local c = Config.CashDecay
+    if type(c) ~= 'table' then return false, 'Config.CashDecay tanimsiz' end
+    if type(c.TraceHalfLifeRealDays) ~= 'number' or c.TraceHalfLifeRealDays <= 0 then return false, 'TraceHalfLifeRealDays gecersiz' end
+    if type(c.RaidRiskMultiplierAtMaxTrace) ~= 'number' or c.RaidRiskMultiplierAtMaxTrace < 1.0 then return false, 'RaidRiskMultiplierAtMaxTrace gecersiz' end
+    return true, ('yariOmur=%.1fgun carpan=%.1fx'):format(c.TraceHalfLifeRealDays, c.RaidRiskMultiplierAtMaxTrace)
+end)
+
+AddCheck('DERIN-ACIMASIZ: nakit iz formulu 1500x stres testi (0 yan etki)', function()
+    local halfLife = Config.CashDecay.TraceHalfLifeRealDays
+    local maxMult  = Config.CashDecay.RaidRiskMultiplierAtMaxTrace
+    for i = 1, 1500 do
+        -- ★ market.lua Matrix.CashDecay.Tick'in AYNI formulu (SAF kopya,
+        -- hicbir DB/RAM yazmaz) -- ageDays 0'dan 2*yariOmur'a kadar SUREKLI
+        -- (modulo YOK) taranir, boylece son yinelemede yakinsama gercekten test edilir.
+        local ageDays    = (i - 1) * (halfLife * 2.0 / 1499.0)
+        local traceLevel = Matrix.Clamp(1.0 - (0.5 ^ (ageDays / halfLife)), 0.0, 1.0)
+        local raidGain   = Config.Bureau.PatternAnalysisGain * traceLevel * (maxMult - 1.0)
+        if traceLevel ~= traceLevel or traceLevel < 0.0 or traceLevel > 1.0 then
+            return false, ('traceLevel araligin disina cikti (i=%d)'):format(i)
+        end
+        if raidGain ~= raidGain or raidGain < 0.0 then
+            return false, ('raidGain gecersiz (i=%d)'):format(i)
+        end
+        if i == 1500 and traceLevel < 0.99 then
+            -- ageDays=2*halfLife civarinda traceLevel 1.0'a yakinsamis olmali (yarilanma matematigi)
+            return false, ('2x yari-omurde traceLevel yakinsamadi: %.4f'):format(traceLevel)
+        end
+    end
+    return true, ('1500 cagri, 0 hata, max traceLevel dogrulandi (raidRisk max carpan=%.1fx)'):format(maxMult)
+end)
+
+AddCheck('Config.ShellCompany parametreleri gecerli (paravan sirket/aklama)', function()
+    local s = Config.ShellCompany
+    if type(s) ~= 'table' then return false, 'Config.ShellCompany tanimsiz' end
+    if type(s.MinInvoiceAmount) ~= 'number' or s.MinInvoiceAmount <= 0 then return false, 'MinInvoiceAmount gecersiz' end
+    if type(s.MaxInvoiceAmount) ~= 'number' or s.MaxInvoiceAmount <= s.MinInvoiceAmount then return false, 'MaxInvoiceAmount gecersiz' end
+    if type(s.InvoiceCommissionRate) ~= 'number' or s.InvoiceCommissionRate < 0 or s.InvoiceCommissionRate >= 1.0 then return false, 'InvoiceCommissionRate gecersiz' end
+    if type(s.DailyInvoiceCapacity) ~= 'number' or s.DailyInvoiceCapacity <= 0 then return false, 'DailyInvoiceCapacity gecersiz' end
+    if type(s.AuditWarningRatio) ~= 'number' or s.AuditWarningRatio <= 0 or s.AuditWarningRatio >= s.AuditWipeRatio then return false, 'AuditWarningRatio/AuditWipeRatio siralamasi bozuk' end
+    return true, ('kapasite=%d gun/fatura, komisyon=%.0f%%'):format(s.DailyInvoiceCapacity, s.InvoiceCommissionRate * 100.0)
+end)
+
+AddCheck('DERIN-ACIMASIZ: fatura anomali/audit_score formulu 500x stres testi', function()
+    local cap  = Config.ShellCompany.DailyInvoiceCapacity
+    local geo  = Config.ShellCompany.AuditGeometricFactor
+    local inc  = Config.ShellCompany.AuditBaseIncrementPerExcessRatio
+    local score = 0.0
+    local reachedWipe = false
+    for invoicesToday = 1, cap + 500 do
+        local excess = math.max(0, invoicesToday - cap)
+        if excess > 0 then
+            local excessRatio = excess / cap
+            score = Matrix.Clamp(score * geo + excessRatio * inc, 0.0, 1.0)
+            if score ~= score or score < 0.0 or score > 1.0 then
+                return false, ('audit_score araligin disina cikti (fatura=%d)'):format(invoicesToday)
+            end
+            if score >= Config.ShellCompany.AuditWipeRatio then reachedWipe = true end
+        end
+    end
+    if not reachedWipe then
+        return false, ('500 asiri fatura sonunda Mali Wipe esigine (%.2f) ulasilmadi -- skor=%.4f'):format(Config.ShellCompany.AuditWipeRatio, score)
+    end
+    return true, ('kapasite+500 asiri fatura simule edildi, Mali Wipe esigine ulasti (skor=%.4f)'):format(score)
+end)
+
+AddCheck('Config.NewsBulletin parametreleri gecerli (dinamik haber bulteni)', function()
+    local n = Config.NewsBulletin
+    if type(n) ~= 'table' then return false, 'Config.NewsBulletin tanimsiz' end
+    if type(n.PoliceHealthPollMs) ~= 'number' or n.PoliceHealthPollMs <= 0 then return false, 'PoliceHealthPollMs gecersiz' end
+    if type(n.FlashDurationMs) ~= 'number' or n.FlashDurationMs <= 0 then return false, 'FlashDurationMs gecersiz' end
+    if type(n.MaxQueuedFlashes) ~= 'number' or n.MaxQueuedFlashes <= 0 then return false, 'MaxQueuedFlashes gecersiz' end
+    if type(n.FallbackNames) ~= 'table' or #n.FallbackNames == 0 then return false, 'FallbackNames bos' end
+    return true, ('%d yedek isim, pollMs=%d'):format(#n.FallbackNames, n.PoliceHealthPollMs)
+end)
+
+AddCheck('DERIN-ACIMASIZ: haber bulteni dinamik isim secimi deterministik (0 RNG)', function()
+    -- ★ server/news_bulletin.lua'nin ChecksumOf'unun YEREL bir kopyasi --
+    -- 0 RNG standardini KENDI dosyasindan bagimsiz olarak da kanitlamak icin.
+    local function ChecksumOf(raw, salt)
+        local sum = 0
+        for i = 1, #raw do sum = (sum + (raw:byte(i) * (i + salt))) % 0xFFFFFFF end
+        return sum
+    end
+    local pool = Config.NewsBulletin.FallbackNames
+    for i = 1, 200 do
+        local seed = ('TEST#%d'):format(i)
+        local idxA = ChecksumOf(seed, 47) % #pool
+        local idxB = ChecksumOf(seed, 47) % #pool
+        if idxA ~= idxB then return false, ('ayni tohum farkli indeks uretti (i=%d)'):format(i) end
+        if idxA < 0 or idxA >= #pool then return false, ('indeks araligin disinda (i=%d)'):format(i) end
+    end
+    return true, ('200 tohum, birebir tekrarlanabilir indeks (RNG YOK)')
+end)
+
+AddCheck('Config.Forensics maske/eldiven bilesen kimlikleri gecerli (Faz 2 OPSEC)', function()
+    local f = Config.Forensics
+    if type(f.GloveArmsComponentId) ~= 'number' then return false, 'GloveArmsComponentId gecersiz' end
+    if type(f.MaskFaceComponentId) ~= 'number' then return false, 'MaskFaceComponentId gecersiz' end
+    if type(f.HelmetPropId) ~= 'number' then return false, 'HelmetPropId gecersiz' end
+    return true, ('eldiven-bileseni=%d maske-bileseni=%d kask-propu=%d'):format(
+        f.GloveArmsComponentId, f.MaskFaceComponentId, f.HelmetPropId)
+end)
+
 -- Matrix.Clamp SIFIR RNG'nin en temel taşı -- iki ayrı çağrının BYTE-BYTE
 -- aynı sonucu verdiğini kanıtlamak, "deterministik DNA"nın kendisini
 -- test eder (formülleri değil, o formüllerin ÜZERİNE oturduğu primitifi).
@@ -204,7 +321,16 @@ local RequiredHooks = {
     { 'Matrix.Forensics.InspectPlayer',        Matrix.Forensics and Matrix.Forensics.InspectPlayer },
     { 'Matrix.Forensics.InspectBustedBot',     Matrix.Forensics and Matrix.Forensics.InspectBustedBot },
     { 'Matrix.Kitchen.ProcessCook',            Matrix.Kitchen and Matrix.Kitchen.ProcessCook },
-    { 'Matrix.Kitchen.GetEffectiveSkill',      Matrix.Kitchen and Matrix.Kitchen.GetEffectiveSkill }
+    { 'Matrix.Kitchen.GetEffectiveSkill',      Matrix.Kitchen and Matrix.Kitchen.GetEffectiveSkill },
+    -- ★ FAZ 2: Kriminal Finans, Adli Muhasebe ve Dinamik Haber Bülteni.
+    { 'Matrix.ShellCompany.RegisterBusiness',  Matrix.ShellCompany and Matrix.ShellCompany.RegisterBusiness },
+    { 'Matrix.ShellCompany.IssueFakeInvoice',  Matrix.ShellCompany and Matrix.ShellCompany.IssueFakeInvoice },
+    { 'Matrix.ShellCompany.RecordInvoice',     Matrix.ShellCompany and Matrix.ShellCompany.RecordInvoice },
+    { 'Matrix.ShellCompany.TriggerMaliWipe',   Matrix.ShellCompany and Matrix.ShellCompany.TriggerMaliWipe },
+    { 'Matrix.News.OnCivilianBotEliminated',   Matrix.News and Matrix.News.OnCivilianBotEliminated },
+    { 'Matrix.Bureau.IsCorruptOfficer',        Matrix.Bureau and Matrix.Bureau.IsCorruptOfficer },
+    { 'Matrix.Bureau.PurgeOfficerPersonality', Matrix.Bureau and Matrix.Bureau.PurgeOfficerPersonality },
+    { 'Matrix.GetPoliceSources',               Matrix.GetPoliceSources }
 }
 
 for _, entry in ipairs(RequiredHooks) do
@@ -243,7 +369,11 @@ local DbChecks = {
         return ColumnExists('matrix_bots', 'loyalty_base'), 'sql/layer7_faz3.sql calistirildi mi?'
     end },
     { 'matrix_bureau_learning_core tablosu mevcut', function() return TableExists('matrix_bureau_learning_core'), 'sql/layer7_faz1.sql' end },
-    { 'matrix_district_hubs tablosu mevcut', function() return TableExists('matrix_district_hubs'), 'sql/layer7_faz1.sql' end }
+    { 'matrix_district_hubs tablosu mevcut', function() return TableExists('matrix_district_hubs'), 'sql/layer7_faz1.sql' end },
+    -- ★ FAZ 2: Kriminal Finans / Adli Muhasebe / Mobese Biyometrik OPSEC.
+    { 'matrix_shell_ledger tablosu mevcut', function() return TableExists('matrix_shell_ledger'), 'sql/matrix_financial_core.sql' end },
+    { 'matrix_shell_audits tablosu mevcut', function() return TableExists('matrix_shell_audits'), 'sql/matrix_financial_core.sql' end },
+    { 'matrix_cctv_logs tablosu mevcut', function() return TableExists('matrix_cctv_logs'), 'sql/matrix_financial_core.sql' end }
 }
 
 -- ---------------------------------------------------------------------

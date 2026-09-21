@@ -1793,6 +1793,41 @@ end
 local PolicePersonalityCache = {}
 
 
+-- ★ FAZ 2 [HABER BÜLTENİ KÖPRÜSÜ]: en az bir kez BAŞARILI rüşvet kabul
+-- etmiş memurların identityKey kümesi (bkz. ProcessBribeOffer aşağıda).
+-- server/news_bulletin.lua, yozlaşmış bir memur öldüğünde bu kümeyi
+-- okuyup Matrix.Bureau.PurgeOfficerPersonality ile kişilik genetiği
+-- önbelleğini VE bu bayrağı kalıcı olarak temizler ("rüşvet kanalı imha
+-- edildi") -- yeni bir DB tablosu İCAT EDİLMEZ, RAM'de tutulur (aynı
+-- PolicePersonalityCache'in doğruluk için ZORUNLU olmayan önbellek
+-- felsefesi: kaybolursa yalnızca "yozlaşmış" etiketi sıfırlanır, oyun
+-- akışı ÇÖKMEZ).
+local CorruptOfficers = {}
+
+
+function Matrix.Bureau.IsCorruptOfficer(identityKey)
+    return type(identityKey) == 'string' and CorruptOfficers[identityKey] == true
+end
+
+
+-- ★ FAZ 2: bir memur öldürüldüğünde çağrılır -- kişilik genetiği
+-- önbelleğini VE yozlaşmışlık bayrağını temizler. Aynı identityKey
+-- (citizenid, KALICI) bir dahaki GetPolicePersonality çağrısında AYNI
+-- deterministik ChecksumOf formülünden yeniden türetilir (RNG YOK) --
+-- burada "silinen" şey doğruluk değil, yalnızca o karakterin BİRİKMİŞ
+-- yozlaşmışlık/rüşvet geçmişi izlenimidir.
+function Matrix.Bureau.PurgeOfficerPersonality(identityKey)
+    if type(identityKey) ~= 'string' or identityKey == '' then return false end
+    local wasCorrupt = CorruptOfficers[identityKey] == true
+    PolicePersonalityCache[identityKey] = nil
+    CorruptOfficers[identityKey] = nil
+    if wasCorrupt then
+        Matrix.Log('BUREAU', '[OPSEC][RUSVET KANALI IMHA EDILDI] %s -- kisilik genetigi onbellegi temizlendi.', identityKey)
+    end
+    return wasCorrupt
+end
+
+
 -- ★ Memurun benzersiz kimliğini TEK bir string'e indirger: gerçek oyuncu
 -- için citizenid yeterlidir (kalıcı, biricik); NPC polis için model hash +
 -- spawn koordinatı (aynı NPC HER ZAMAN aynı kişiliği taşır — ikisi de
@@ -1931,6 +1966,13 @@ function Matrix.Bureau.ProcessBribeOffer(officerSrc, suspectSrc, moneyAmount, ca
         if charged then
             PaySuspectCashToOfficer(officerSrc, moneyAmount)
         end
+
+
+        -- ★ FAZ 2: bu memur artık "yozlaşmış" olarak işaretlenir (bkz.
+        -- Matrix.Bureau.IsCorruptOfficer/PurgeOfficerPersonality) --
+        -- server/news_bulletin.lua bu memur öldürüldüğünde kişilik
+        -- genetiği önbelleğini ve rüşvet kanalını imha eder.
+        CorruptOfficers[officerState.citizenid] = true
 
 
         -- ★ [OPSEC FAZ 1 EK] KANIT ODASI SABOTAJI KÖPRÜSÜ: rüşvet başarılı
