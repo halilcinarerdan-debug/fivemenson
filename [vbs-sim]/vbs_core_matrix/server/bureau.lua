@@ -397,7 +397,12 @@ function Matrix.Bureau.OnUnencryptedComms(actorRef, coords)
     local gain = (Config.Bureau.TriangulationDecryptionGain / normRadius)
                  * (1.0 + heat)
                  / #hitTowers
-    gain = Matrix.Clamp(gain, 0.0, 0.5)
+    -- ★ [FAZ 2][KATMAN 1] BureaucraticVelocity: şehirdeki aktif çete
+    -- sayısına göre Büro'nun reaksiyonunu çarpımsal olarak ölçekler (bkz.
+    -- dosya sonu Matrix.Bureau.GetBureaucraticVelocity). Fonksiyon tanımsızsa
+    -- (bu FAZ yüklü değilse) 1.0 varsayılır -- davranış BİREBİR ESKİSİ GİBİDİR.
+    local velocity = Matrix.Bureau.GetBureaucraticVelocity and Matrix.Bureau.GetBureaucraticVelocity() or 1.0
+    gain = Matrix.Clamp(gain * velocity, 0.0, 0.5)
 
 
     Matrix.Bureau.AdvanceDecryption(trapHouseId, gain)
@@ -490,7 +495,10 @@ function Matrix.Bureau.Tick()
         if not house.raid_ordered then
             local regularity = ComputePatternRegularity(trapHouseId)
             local heat       = cyberLeakHeatmap[trapHouseId] or 0.0
-            local gain       = Config.Bureau.PatternAnalysisGain * regularity * (1.0 + heat)
+            -- ★ [FAZ 2][KATMAN 1] BureaucraticVelocity çarpanı (bkz. dosya
+            -- sonu) -- aynı guard deseni: hook yoksa 1.0, davranış AYNI.
+            local velocity   = Matrix.Bureau.GetBureaucraticVelocity and Matrix.Bureau.GetBureaucraticVelocity() or 1.0
+            local gain       = Config.Bureau.PatternAnalysisGain * regularity * (1.0 + heat) * velocity
 
 
             if gain > 0.0 then
@@ -1518,8 +1526,10 @@ function Matrix.Bureau.RecordLivestreamRadioLeak(trapHouseId, multiplier)
     if not house then return end
 
     local state = GetLearningState(trapHouseId)
+    -- ★ [FAZ 2][KATMAN 1] BureaucraticVelocity çarpanı -- aynı guard deseni.
+    local velocity = Matrix.Bureau.GetBureaucraticVelocity and Matrix.Bureau.GetBureaucraticVelocity() or 1.0
     state.livestream_leak_accumulator = (state.livestream_leak_accumulator or 0.0)
-        + (Config.Bureau.LivestreamRadioLeakPerTick * (multiplier or 1.0))
+        + (Config.Bureau.LivestreamRadioLeakPerTick * (multiplier or 1.0) * velocity)
 
     local wholeBreaches = math_floor(state.livestream_leak_accumulator)
     if wholeBreaches < 1 then return end
@@ -2129,3 +2139,432 @@ end, false)
 
 exports('GetFearCoefficient', function() return Matrix.Bureau.GetFearCoefficient() end)
 exports('GetEffectiveSnitchThreshold', function() return Matrix.Bureau.GetEffectiveSnitchThreshold() end)
+
+
+-- =====================================================================
+-- ★★★ [FAZ 2] KATMAN 1: DİNAMİK BÜROKRATİK REAKSİYON VE ÖĞRENME HIZI ★★★
+-- TAMAMEN YENİ bir EKLEMEDİR. Yukarıdaki HİÇBİR formül (AdvanceDecryption,
+-- Tick, RecordLivestreamRadioLeak, ComputeLockdownCoefficient, ...)
+-- DEĞİŞTİRİLMEDİ -- dosyanın kendi ortasında bu üç MEVCUT kazanç noktasına
+-- tek bir çarpımsal terim (Matrix.Bureau.GetBureaucraticVelocity()) eklendi,
+-- guard'lı ("fonksiyon tanımsızsa 1.0" -- bu blok hiç yüklenmese bile
+-- davranış BİREBİR ESKİSİ GİBİDİR).
+--
+-- "AKTİF ÇETE SAYISI": bu proje TEK bir oyuncu hiyerarşisi (Config.Hierarchy)
+-- etrafında kurulu -- şehirde ayrı "çete" nesneleri (gang_id) tutan bir
+-- tablo YOKTUR. Bu yüzden ikinci bir sahte/paralel sayaç İCAT EDİLMEZ: her
+-- AKTİF (henüz baskına uğramamış, raid_ordered=false) trap house zaten
+-- şehirde faal bir suç operasyonunu temsil eder -- Matrix.TrapHouses
+-- ÜZERİNDEN SALT-OKUNUR olarak sayılır (ZATEN VAR OLAN durum, yeni bir
+-- tablo/DB yazımı YOK, statik 10/2 gibi bir kısıt da YOK -- n serbestçe
+-- büyür/küçülür).
+--
+-- FORMÜL (RNG YOK, iki dallı, referans noktasında SÜREKLİ/AYNI):
+--   n   = aktif (raid_ordered=false) trap house sayısı
+--   ref = Config.Bureau.BureaucraticReferenceGangCount
+--   n >= ref (KALABALIK):
+--     excess   = (n - ref) / ref
+--     velocity = 1 / (1 + log_LoadLogBase(1 + excess))   -- LOGARİTMİK yavaşlama
+--     velocity = max(velocity, VelocityFloor)             -- sert taban
+--   n < ref (TEKELLEŞME):
+--     scarcity = ref - n
+--     velocity = exp(MonopolyGrowthRate * scarcity)        -- ÜSSEL hızlanma
+--     velocity = min(velocity, VelocityCeiling)            -- sert tavan
+-- n == ref sınırında HER İKİ dal da velocity=1.0 üretir (süreklilik kanıtı:
+-- excess=0 -> log(1)=0 -> 1/(1+0)=1.0; scarcity=0 -> exp(0)=1.0) -- yani
+-- "normal" çete yoğunluğunda davranış BUGÜNE KADARKİ (velocity hiç yokmuş
+-- gibi) formüllerle BİREBİR AYNIDIR, geriye dönük uyumlu.
+-- =====================================================================
+function Matrix.Bureau.GetActiveGangCount()
+    local n = 0
+    for _, house in pairs(Matrix.TrapHouses) do
+        if not house.raid_ordered then n = n + 1 end
+    end
+    return n
+end
+
+
+function Matrix.Bureau.GetBureaucraticVelocity()
+    local n   = Matrix.Bureau.GetActiveGangCount()
+    local ref = math_max(Config.Bureau.BureaucraticReferenceGangCount, 1)
+
+    if n >= ref then
+        local excess   = (n - ref) / ref
+        local velocity = 1.0 / (1.0 + math.log(1.0 + excess, Config.Bureau.BureaucraticLoadLogBase))
+        return math_max(velocity, Config.Bureau.BureaucraticVelocityFloor)
+    end
+
+    local scarcity = ref - n
+    local velocity = math.exp(Config.Bureau.BureaucraticMonopolyGrowthRate * scarcity)
+    return math_min(velocity, Config.Bureau.BureaucraticVelocityCeiling)
+end
+
+
+RegisterCommand('burokrasidurum', function(src)
+    local n        = Matrix.Bureau.GetActiveGangCount()
+    local velocity = Matrix.Bureau.GetBureaucraticVelocity()
+    Reply(src, ('Aktif Cete:%d | Referans:%d | BureaucraticVelocity:x%.3f (taban:%.2f, tavan:%.2f)'):format(
+        n, Config.Bureau.BureaucraticReferenceGangCount, velocity,
+        Config.Bureau.BureaucraticVelocityFloor, Config.Bureau.BureaucraticVelocityCeiling))
+end, false)
+
+
+exports('GetActiveGangCount',      function() return Matrix.Bureau.GetActiveGangCount() end)
+exports('GetBureaucraticVelocity', function() return Matrix.Bureau.GetBureaucraticVelocity() end)
+
+
+-- =====================================================================
+-- ★★★ [FAZ 2] KATMAN 3: PARAVAN İŞLETMELER VE SAHTE FATURA MOTORU ★★★
+-- TAMAMEN YENİ bir EKLEMEDİR. matrix_zone_ledger'ın MEVCUT (market.lua'nın
+-- KENDİ yönettiği) sale_count/total_grams/gross_revenue/net_profit/
+-- price_crash_count kolonlarına HİÇ DOKUNULMAZ -- bu blok AYNI tabloya
+-- sql/layer7_faz4_front_business.sql ile eklenen BAĞIMSIZ, YENİ kolonları
+-- (owner_citizenid/business_label/clean_balance/dirty_cash_pool/
+-- dirty_deposited_at) okur/yazar. İki blok AYNI satırın (zone_id PK)
+-- FARKLI kolonlarını günceller -- çakışma YOKTUR.
+--
+-- AKLAMA ZİNCİRİ (RNG YOK):
+--   1) Oyuncu, kendi sahiplendiği paravan işletmenin kasasına (dirty_cash_
+--      pool) fiziksel 'cash'ini YATIRIR (DepositDirtyCash) -- kasa ilk kez
+--      dolarken dirty_deposited_at = ŞİMDİ olarak damgalanır.
+--   2) Kasadaki para BEKLEDİKÇE, Config.CashDecay.TraceHalfLifeRealDays İLE
+--      AYNI yarı-ömür formülü (Matrix.CashDecay.Tick'in KENDİSİ, market.lua,
+--      DEĞİŞTİRİLMEDİ) burada BAĞIMSIZ bir kasa için yeniden tüketilir --
+--      bekletilen kirli para zamanla "daha sıcak" (daha pahalı) hale gelir.
+--   3) Oyuncu SAHTE FATURA keser (IssueFakeInvoice): kasadan istenen tutar
+--      düşülür (Config.CashDecay.LaunderReducesAmount İLE AYNI kural), yasal
+--      komisyon (BaseCommissionRate + iz*TraceCommissionPenalty, tavanı
+--      MaxCommissionRate) kesilir, KALAN net miktar Matrix.QBX:GetPlayer
+--      (src).Functions.AddMoney('bank', ...) ile oyuncunun YASAL banka
+--      hesabına TEMİZ para olarak geçer.
+-- =====================================================================
+
+Matrix.FrontBusiness = Matrix.FrontBusiness or {}
+
+local frontBusinesses    = {}   -- [zoneId] = { owner_citizenid, business_label, clean_balance, dirty_cash_pool, dirty_deposited_at(epoch|nil) }
+local dirtyFrontBusiness = {}
+
+
+local function GetFrontBusinessConfig(zoneId)
+    for _, cfg in ipairs(Config.FrontBusiness.Businesses) do
+        if cfg.zone_id == zoneId then return cfg end
+    end
+    return nil
+end
+
+
+local function GetFrontBusinessState(zoneId)
+    local state = frontBusinesses[zoneId]
+    if not state then
+        local cfg = GetFrontBusinessConfig(zoneId)
+        state = {
+            owner_citizenid    = nil,
+            business_label     = cfg and cfg.business_label or ('Isletme #%d'):format(zoneId),
+            clean_balance      = 0.0,
+            dirty_cash_pool    = 0.0,
+            dirty_deposited_at = nil
+        }
+        frontBusinesses[zoneId] = state
+    end
+    return state
+end
+
+
+-- ★ sql/layer7_faz4_front_business.sql çalıştırılmadıysa bu SELECT hata
+-- verir -- LoadTrapHouses/LoadLearningCore İLE AYNI disiplin: pcall ile
+-- sarılır, hata RAM'i BOŞ bırakır (varsayılan değerlerle çalışmaya devam
+-- eder), sunucu AÇILIŞINI asla düşürmez.
+-- NOT: dirty_deposited_at RAM'e (market.lua'nın KENDİ CashByTrapHouse
+-- yükleyicisiyle AYNI, bilinçli basitleştirme) DB'deki gerçek zaman damgası
+-- yerine "ŞİMDİ" olarak yüklenir -- restart sonrası iz seviyesi en fazla
+-- bir tık daha düşük başlar, dengeyi bozmaz.
+function Matrix.FrontBusiness.LoadFrontBusinesses()
+    local ok, rows = pcall(function()
+        return MySQL.query.await(
+            'SELECT zone_id, owner_citizenid, business_label, clean_balance, dirty_cash_pool, dirty_deposited_at FROM matrix_zone_ledger',
+            {}
+        )
+    end)
+    if not ok or type(rows) ~= 'table' then
+        Matrix.Log('BUREAU', '[FAZ2][PARAVAN] matrix_zone_ledger okunamadi (migration eksik olabilir) -- RAM varsayilanlariyla baslatildi.')
+        return
+    end
+
+    for _, row in ipairs(rows) do
+        if row.zone_id then
+            frontBusinesses[row.zone_id] = {
+                owner_citizenid    = row.owner_citizenid,
+                business_label     = row.business_label or (GetFrontBusinessConfig(row.zone_id) or {}).business_label,
+                clean_balance      = tonumber(row.clean_balance) or 0.0,
+                dirty_cash_pool    = tonumber(row.dirty_cash_pool) or 0.0,
+                dirty_deposited_at = row.dirty_deposited_at and Matrix.Now() or nil
+            }
+        end
+    end
+    Matrix.Log('BUREAU', '[FAZ2][PARAVAN] %d paravan isletme kaydi RAM onbellege yuklendi.', #rows)
+end
+
+
+CreateThread(function()
+    Matrix.FrontBusiness.LoadFrontBusinesses()
+end)
+
+
+-- ★ [SEC-3] bkz. FlushDirtyDecryption yorumu -- aynı batch+transaction disiplini.
+local function FlushDirtyFrontBusiness()
+    local queries = {}
+    for zoneId in pairs(dirtyFrontBusiness) do
+        local state = frontBusinesses[zoneId]
+        if state then
+            queries[#queries + 1] = {
+                query = [[
+                    INSERT INTO matrix_zone_ledger (zone_id, owner_citizenid, business_label, clean_balance, dirty_cash_pool, dirty_deposited_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON DUPLICATE KEY UPDATE
+                        owner_citizenid    = VALUES(owner_citizenid),
+                        business_label     = VALUES(business_label),
+                        clean_balance      = VALUES(clean_balance),
+                        dirty_cash_pool    = VALUES(dirty_cash_pool),
+                        dirty_deposited_at = VALUES(dirty_deposited_at)
+                ]],
+                values = {
+                    zoneId, state.owner_citizenid, state.business_label, state.clean_balance,
+                    state.dirty_cash_pool,
+                    state.dirty_deposited_at and os_date('%Y-%m-%d %H:%M:%S', state.dirty_deposited_at) or nil
+                }
+            }
+        end
+        dirtyFrontBusiness[zoneId] = nil
+    end
+    if #queries == 0 then return end
+    local ok, err = pcall(function() return MySQL.transaction.await(queries) end)
+    if not ok or err == false then
+        Matrix.Log('BUREAU', '[HATA][FAZ2][PARAVAN] FlushDirtyFrontBusiness transaction basarisiz (yutulmadi, log icin): %s', tostring(err))
+    end
+end
+
+
+CreateThread(function()
+    local interval = Config.Persistence.TrapHouseFlushIntervalMs or 20000
+    while true do
+        Wait(interval)
+        FlushDirtyFrontBusiness()
+    end
+end)
+
+
+-- ★ [SEC-3] KAPANIŞ GÜVENLİK AĞI -- ikinci, BAĞIMSIZ bir handler (aynı olay
+-- adına birden fazla AddEventHandler eklemek FiveM/Lua'da güvenlidir, hepsi
+-- sırayla tetiklenir); dosya başındaki mevcut kapanış handler'ı DEĞİŞTİRİLMEDİ.
+AddEventHandler('txAdmin:events:serverShuttingDown', function()
+    local ok, err = pcall(FlushDirtyFrontBusiness)
+    if not ok then
+        Matrix.Log('BUREAU', '[HATA][FAZ2][PARAVAN] Kapanis flush hata verdi (yutulmadi, log icin): %s', tostring(err))
+    end
+end)
+
+
+function Matrix.FrontBusiness.ClaimBusiness(src, zoneId)
+    zoneId = tonumber(zoneId)
+    if not zoneId or not GetFrontBusinessConfig(zoneId) then return false, 'bad_zone' end
+
+    local playerState = Matrix.GetOrCreatePlayerState(src)
+    if not playerState or not playerState.citizenid then return false, 'player_unresolved' end
+
+    local state = GetFrontBusinessState(zoneId)
+    if state.owner_citizenid and state.owner_citizenid ~= playerState.citizenid then
+        return false, 'already_owned'
+    end
+
+    state.owner_citizenid = playerState.citizenid
+    dirtyFrontBusiness[zoneId] = true
+
+    Matrix.Log('BUREAU', '[FAZ2][PARAVAN] Isletme #%d (%s) sahiplenildi: %s',
+        zoneId, state.business_label, playerState.citizenid)
+    return true
+end
+
+
+-- ★ RÜŞVET EKONOMİSİ bloğuyla (yukarıda) AYNI Matrix.QBX:GetPlayer +
+-- Functions.RemoveMoney kalıbı; yeni bir ödeme altyapısı İCAT EDİLMEZ.
+local function ChargeFrontBusinessCash(src, amount)
+    local ok, player = pcall(function() return Matrix.QBX:GetPlayer(src) end)
+    if not ok or not player or not player.PlayerData then return false end
+
+    local cash = (player.PlayerData.money and player.PlayerData.money.cash) or 0
+    if cash < amount then return false end
+
+    local removeOk, removeResult = pcall(function() return player.Functions.RemoveMoney('cash', amount, 'front-business-deposit') end)
+    return removeOk and removeResult == true
+end
+
+
+function Matrix.FrontBusiness.DepositDirtyCash(src, zoneId, amount)
+    zoneId = tonumber(zoneId)
+    amount = tonumber(amount)
+    if not zoneId or not GetFrontBusinessConfig(zoneId) then return false, 'bad_zone' end
+    if not amount or amount ~= amount or amount <= 0.0 then return false, 'bad_amount' end
+
+    local playerState = Matrix.GetOrCreatePlayerState(src)
+    if not playerState or not playerState.citizenid then return false, 'player_unresolved' end
+
+    local state = GetFrontBusinessState(zoneId)
+    if state.owner_citizenid ~= playerState.citizenid then return false, 'not_owner' end
+
+    if not ChargeFrontBusinessCash(src, amount) then return false, 'insufficient_cash' end
+
+    if state.dirty_cash_pool <= 0.0 then
+        state.dirty_deposited_at = Matrix.Now()
+    end
+    state.dirty_cash_pool = state.dirty_cash_pool + amount
+    dirtyFrontBusiness[zoneId] = true
+
+    Matrix.Log('BUREAU', '[FAZ2][PARAVAN] Isletme #%d kasasina kirli nakit yatirildi: +%.1f (toplam:%.1f) | %s',
+        zoneId, amount, state.dirty_cash_pool, playerState.citizenid)
+    return true
+end
+
+
+-- ★ Matrix.CashDecay.Tick'in (server/market.lua) KENDİ formülüyle BİREBİR
+-- AYNI yarı-ömür hesabı -- yeni bir decay eğrisi İCAT EDİLMEZ, yalnızca
+-- girdisi (deposited_at) BAĞIMSIZ bir kasadan (işletme, trap house DEĞİL) alınır.
+function Matrix.FrontBusiness.ComputeTraceLevel(zoneId)
+    local state = GetFrontBusinessState(zoneId)
+    if state.dirty_cash_pool <= 0.0 or not state.dirty_deposited_at then return 0.0 end
+
+    local ageDays = math_max((Matrix.Now() - state.dirty_deposited_at) / 86400.0, 0.0)
+    return Matrix.Clamp(1.0 - (0.5 ^ (ageDays / Config.CashDecay.TraceHalfLifeRealDays)), 0.0, 1.0)
+end
+
+
+function Matrix.FrontBusiness.ComputeCommissionRate(zoneId)
+    local trace = Matrix.FrontBusiness.ComputeTraceLevel(zoneId)
+    local rate  = Config.FrontBusiness.BaseCommissionRate + (trace * Config.FrontBusiness.TraceCommissionPenalty)
+    return Matrix.Clamp(rate, Config.FrontBusiness.BaseCommissionRate, Config.FrontBusiness.MaxCommissionRate)
+end
+
+
+function Matrix.FrontBusiness.IssueFakeInvoice(src, zoneId, amount)
+    zoneId = tonumber(zoneId)
+    amount = tonumber(amount)
+    if not zoneId or not GetFrontBusinessConfig(zoneId) then return false, 'bad_zone' end
+    if not amount or amount ~= amount or amount <= 0.0 then return false, 'bad_amount' end
+    if amount < Config.FrontBusiness.MinInvoiceAmount or amount > Config.FrontBusiness.MaxInvoiceAmount then
+        return false, 'amount_out_of_bounds'
+    end
+
+    local playerState = Matrix.GetOrCreatePlayerState(src)
+    if not playerState or not playerState.citizenid then return false, 'player_unresolved' end
+
+    local state = GetFrontBusinessState(zoneId)
+    if state.owner_citizenid ~= playerState.citizenid then return false, 'not_owner' end
+    if amount > state.dirty_cash_pool then return false, 'insufficient_dirty_pool' end
+
+    local commission = Matrix.FrontBusiness.ComputeCommissionRate(zoneId)
+    local netClean    = amount * (1.0 - commission)
+
+    -- ★ Config.CashDecay.LaunderReducesAmount İLE AYNI kural: aklama kasadaki
+    -- kirli miktarı FİZİKSEL olarak azaltır (bkz. Matrix.CashDecay.Launder,
+    -- market.lua, DEĞİŞTİRİLMEDİ) -- burada AYNI disiplin BAĞIMSIZ kasaya uygulanır.
+    if Config.CashDecay.LaunderReducesAmount then
+        state.dirty_cash_pool = math_max(state.dirty_cash_pool - amount, 0.0)
+    end
+    if state.dirty_cash_pool <= 0.0 then
+        state.dirty_deposited_at = nil
+    end
+    state.clean_balance = state.clean_balance + netClean
+    dirtyFrontBusiness[zoneId] = true
+
+    local ok, player = pcall(function() return Matrix.QBX:GetPlayer(src) end)
+    local paid = false
+    if ok and player then
+        paid = pcall(function() player.Functions.AddMoney('bank', netClean, 'front-business-invoice') end)
+    end
+
+    -- ★ Pasif server-içi yayın (raidIssued/bureauLockdown İLE AYNI desen) --
+    -- gelecekteki dinleyiciler (varsa) için; hiçbiri dinlemese de zararsızdır.
+    TriggerEvent('matrix:internal:frontBusinessLaundered', zoneId, playerState.citizenid, amount, netClean, commission)
+
+    Matrix.Log('BUREAU', '[FAZ2][PARAVAN] Isletme #%d sahte fatura: brut=%.1f komisyon=%.3f net-temiz=%.1f -> banka:%s | %s',
+        zoneId, amount, commission, netClean, tostring(paid), playerState.citizenid)
+
+    return true, { invoiced = amount, commission = commission, net_clean = netClean, paid = paid }
+end
+
+
+-- =====================================================================
+-- CALLBACK'LER (ox_lib) -- client/front_business_client.lua'nın YEREL
+-- (NUI'siz) menüsü bu 4 callback'i tüketir. HİÇBİRİ client/hud.lua'ya DOKUNMAZ.
+-- =====================================================================
+lib.callback.register('matrix:callback:frontBusinessLedger', function(src, zoneId)
+    zoneId = tonumber(zoneId)
+    if not zoneId or not GetFrontBusinessConfig(zoneId) then return nil end
+    local state = GetFrontBusinessState(zoneId)
+    return {
+        zone_id         = zoneId,
+        owner_citizenid = state.owner_citizenid,
+        business_label  = state.business_label,
+        clean_balance   = state.clean_balance,
+        dirty_cash_pool = state.dirty_cash_pool,
+        trace_level     = Matrix.FrontBusiness.ComputeTraceLevel(zoneId),
+        commission_rate = Matrix.FrontBusiness.ComputeCommissionRate(zoneId)
+    }
+end)
+
+lib.callback.register('matrix:callback:frontBusinessClaim', function(src, zoneId)
+    return Matrix.FrontBusiness.ClaimBusiness(src, zoneId)
+end)
+
+lib.callback.register('matrix:callback:frontBusinessDeposit', function(src, zoneId, amount)
+    return Matrix.FrontBusiness.DepositDirtyCash(src, zoneId, amount)
+end)
+
+lib.callback.register('matrix:callback:frontBusinessInvoice', function(src, zoneId, amount)
+    return Matrix.FrontBusiness.IssueFakeInvoice(src, zoneId, amount)
+end)
+
+
+-- =====================================================================
+-- MONOKROM TAKTİK DEBUG PANELİ -- diğer tüm mekaniklerle AYNI disiplin.
+-- =====================================================================
+RegisterCommand('paravandurum', function(src, args)
+    local zoneId = tonumber(args[1])
+    if not zoneId or not GetFrontBusinessConfig(zoneId) then Reply(src, 'Kullanim: /paravandurum [zoneId]'); return end
+    local state = GetFrontBusinessState(zoneId)
+    Reply(src, ('Isletme #%d (%s) | Sahip:%s | Kirli-Kasa:%.1f | Temiz-Toplam:%.1f | Iz:%.3f | Komisyon:%%%.1f'):format(
+        zoneId, state.business_label, state.owner_citizenid or 'SAHIPSIZ', state.dirty_cash_pool,
+        state.clean_balance, Matrix.FrontBusiness.ComputeTraceLevel(zoneId), Matrix.FrontBusiness.ComputeCommissionRate(zoneId) * 100.0))
+end, false)
+
+RegisterCommand('paravansahiplen', function(src, args)
+    local zoneId = tonumber(args[1])
+    if not zoneId then Reply(src, 'Kullanim: /paravansahiplen [zoneId]'); return end
+    local ok, reason = Matrix.FrontBusiness.ClaimBusiness(src, zoneId)
+    Reply(src, ok and 'Isletme sahiplenildi.' or ('Basarisiz: %s'):format(tostring(reason)))
+end, false)
+
+RegisterCommand('paravannakityatir', function(src, args)
+    local zoneId = tonumber(args[1])
+    local amount = tonumber(args[2])
+    if not zoneId or not amount then Reply(src, 'Kullanim: /paravannakityatir [zoneId] [miktar]'); return end
+    local ok, reason = Matrix.FrontBusiness.DepositDirtyCash(src, zoneId, amount)
+    Reply(src, ok and 'Kirli nakit kasaya yatirildi.' or ('Basarisiz: %s'):format(tostring(reason)))
+end, false)
+
+RegisterCommand('paravanfatura', function(src, args)
+    local zoneId = tonumber(args[1])
+    local amount = tonumber(args[2])
+    if not zoneId or not amount then Reply(src, 'Kullanim: /paravanfatura [zoneId] [miktar]'); return end
+    local ok, result = Matrix.FrontBusiness.IssueFakeInvoice(src, zoneId, amount)
+    if ok then
+        Reply(src, ('Fatura kesildi: brut=%.1f komisyon=%%%.1f net-temiz=%.1f (bankaya aktarildi).'):format(
+            result.invoiced, result.commission * 100.0, result.net_clean))
+    else
+        Reply(src, ('Fatura basarisiz: %s'):format(tostring(result)))
+    end
+end, false)
+
+
+exports('ClaimFrontBusiness',   function(src, zoneId) return Matrix.FrontBusiness.ClaimBusiness(src, zoneId) end)
+exports('DepositFrontBusiness', function(src, zoneId, amount) return Matrix.FrontBusiness.DepositDirtyCash(src, zoneId, amount) end)
+exports('InvoiceFrontBusiness', function(src, zoneId, amount) return Matrix.FrontBusiness.IssueFakeInvoice(src, zoneId, amount) end)

@@ -596,6 +596,28 @@ end
 -- ADLİ KRİMİNAL RAPORU (ASCII, askeri evrak formatı) - ox_inventory
 -- item.metadata.description alanına basılır, tooltip'te gösterilir.
 -- =====================================================================
+-- =====================================================================
+-- ★★★ [FAZ 2] KATMAN 1 KÖPRÜSÜ: FEDERAL BİLİŞSEL YÜK RAPORU ★★★
+-- TAMAMEN YENİ bir EKLEMEDİR. Yukarıdaki hiçbir balistik/adli formül
+-- (SimulateWeaponFire, ComputeJamChance, ComputeMechanicalJamProbability,
+-- ...) DEĞİŞTİRİLMEDİ -- bu, server/bureau.lua'nın (yüklüyse) Bureaucratic
+-- Velocity getter'ını SALT-OKUNUR olarak okuyup BuildForensicReport'a
+-- bilgilendirici BİR SATIR ekleyen saf bir fonksiyondur. RNG YOK.
+-- =====================================================================
+function Matrix.Forensics.GetBureaucraticBacklogNote()
+    if not (Matrix.Bureau and Matrix.Bureau.GetBureaucraticVelocity) then return nil end
+    local ok, velocity = pcall(Matrix.Bureau.GetBureaucraticVelocity)
+    if not ok or type(velocity) ~= 'number' then return nil end
+
+    if velocity < 0.7 then
+        return ('FEDERAL YUK: COK CETELI SEHIR, LAB SIRASI UZUN (hiz x%.2f)'):format(velocity)
+    elseif velocity > 1.5 then
+        return ('FEDERAL ODAK: TEKELLESME, LAB ONCELIKLI ISLENIYOR (hiz x%.2f)'):format(velocity)
+    end
+    return nil
+end
+
+
 local REPORT_WIDTH = 36
 local REPORT_BORDER = ('='):rep(REPORT_WIDTH)
 local REPORT_DIVIDER = ('-'):rep(REPORT_WIDTH)
@@ -627,6 +649,20 @@ function Matrix.Forensics.BuildForensicReport(data)
     if data.weapon_durability ~= nil then
         lines[#lines + 1] = ReportLine('SILAH CANI', ('%.1f%%'):format(data.weapon_durability * 100.0))
         lines[#lines + 1] = ReportLine('TUTUKLUK RISKI', ('%.3f'):format(data.jam_chance or 0.0))
+    end
+
+
+    -- ★ [FAZ 2][KATMAN 1 KÖPRÜSÜ] Federal bilişsel yük notu: server/bureau.lua
+    -- Matrix.Bureau.GetBureaucraticVelocity (yüklüyse) SALT-OKUNUR olarak
+    -- okunur ve raporun sonuna BİLGİLENDİRİCİ bir satır eklenir. Hiçbir
+    -- balistik/adli SAYISAL formül (Q_kovan, match_certainty, jam_chance,
+    -- ...) bu bloktan ETKİLENMEZ -- yalnızca ASCII rapor metni zenginleşir.
+    -- Hook yoksa (bureau.lua'nın bu FAZ'ı yüklü değilse) davranış BİREBİR
+    -- ESKİSİ GİBİDİR (satır hiç eklenmez).
+    local backlogNote = Matrix.Forensics.GetBureaucraticBacklogNote()
+    if backlogNote then
+        lines[#lines + 1] = REPORT_DIVIDER
+        lines[#lines + 1] = backlogNote
     end
 
 

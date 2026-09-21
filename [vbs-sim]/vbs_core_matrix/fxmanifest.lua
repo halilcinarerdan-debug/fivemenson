@@ -16,7 +16,10 @@ client_scripts {
     'client/trap_house_client.lua',
     -- ★ Bestecinin İmzası: spawn-sonrası monokrom taktik bülten + opsiyonel
     -- Bach ses katmanı (bkz. shared/config.lua Config.ComposerSignature).
-    'client/composer_intro.lua'
+    'client/composer_intro.lua',
+    -- ★ [FAZ 2] KATMAN 3: Paravan İşletme ox_lib panosu (/paravanpanel).
+    -- client/hud.lua'ya HİÇ DOKUNMAZ -- ayrı, minimal bir dosyadır.
+    'client/front_business_client.lua'
 }
 
 server_scripts {

@@ -166,6 +166,49 @@ if Config.ComposerSignature then
     end)
 end
 
+-- ★ [FAZ 2] KATMAN 1 regresyon koruması: BureaucraticVelocity n=referans
+-- sınırında SÜREKLİ olmalı (her iki dal da tam 1.0 üretmeli) -- bu,
+-- "normal" çete yoğunluğunda davranışın geriye dönük uyumlu kaldığının
+-- kanıtıdır.
+AddCheck('Bureau.BureaucraticVelocity referans noktasinda sureklilik (=1.0)', function()
+    if type(Matrix.Bureau) ~= 'table' or type(Matrix.Bureau.GetBureaucraticVelocity) ~= 'function' then
+        return false, 'Matrix.Bureau.GetBureaucraticVelocity tanimli degil'
+    end
+    local ref = Config.Bureau.BureaucraticReferenceGangCount
+    if type(ref) ~= 'number' or ref <= 0 then return false, 'BureaucraticReferenceGangCount gecersiz' end
+
+    local excess   = 0.0
+    local velocity = 1.0 / (1.0 + math.log(1.0 + excess, Config.Bureau.BureaucraticLoadLogBase))
+    local scarcity = 0.0
+    local velocity2 = math.exp(Config.Bureau.BureaucraticMonopolyGrowthRate * scarcity)
+
+    if math.abs(velocity - 1.0) > 0.0001 or math.abs(velocity2 - 1.0) > 0.0001 then
+        return false, ('sureklilik bozuldu: dal1=%.4f dal2=%.4f'):format(velocity, velocity2)
+    end
+    return true, ('taban=%.2f tavan=%.2f'):format(Config.Bureau.BureaucraticVelocityFloor, Config.Bureau.BureaucraticVelocityCeiling)
+end)
+
+-- ★ [FAZ 2] KATMAN 3 regresyon koruması: FrontBusiness config bütünlüğü.
+AddCheck('Config.FrontBusiness tanimlari gecerli', function()
+    local fb = Config.FrontBusiness
+    if not fb or type(fb.Businesses) ~= 'table' or #fb.Businesses == 0 then return false, 'Businesses bos' end
+    for i, b in ipairs(fb.Businesses) do
+        if type(b.zone_id) ~= 'number' or type(b.business_label) ~= 'string' or b.business_label == '' then
+            return false, ('Businesses[%d] eksik zone_id/business_label'):format(i)
+        end
+    end
+    if type(fb.MinInvoiceAmount) ~= 'number' or fb.MinInvoiceAmount <= 0 then return false, 'MinInvoiceAmount gecersiz' end
+    if type(fb.MaxInvoiceAmount) ~= 'number' or fb.MaxInvoiceAmount <= fb.MinInvoiceAmount then return false, 'MaxInvoiceAmount gecersiz' end
+    if type(fb.MaxCommissionRate) ~= 'number' or fb.MaxCommissionRate < fb.BaseCommissionRate then
+        return false, 'MaxCommissionRate BaseCommissionRate altinda olamaz'
+    end
+    return true, ('%d isletme, komisyon %.2f-%.2f'):format(#fb.Businesses, fb.BaseCommissionRate, fb.MaxCommissionRate)
+end)
+
+AddCheck('kanca mevcut: Matrix.FrontBusiness.IssueFakeInvoice', function()
+    return type(Matrix.FrontBusiness) == 'table' and type(Matrix.FrontBusiness.IssueFakeInvoice) == 'function', 'kanca'
+end)
+
 -- Matrix.Clamp SIFIR RNG'nin en temel taşı -- iki ayrı çağrının BYTE-BYTE
 -- aynı sonucu verdiğini kanıtlamak, "deterministik DNA"nın kendisini
 -- test eder (formülleri değil, o formüllerin ÜZERİNE oturduğu primitifi).
@@ -243,7 +286,10 @@ local DbChecks = {
         return ColumnExists('matrix_bots', 'loyalty_base'), 'sql/layer7_faz3.sql calistirildi mi?'
     end },
     { 'matrix_bureau_learning_core tablosu mevcut', function() return TableExists('matrix_bureau_learning_core'), 'sql/layer7_faz1.sql' end },
-    { 'matrix_district_hubs tablosu mevcut', function() return TableExists('matrix_district_hubs'), 'sql/layer7_faz1.sql' end }
+    { 'matrix_district_hubs tablosu mevcut', function() return TableExists('matrix_district_hubs'), 'sql/layer7_faz1.sql' end },
+    { 'matrix_zone_ledger.dirty_cash_pool kolonu mevcut (FAZ2 migration)', function()
+        return ColumnExists('matrix_zone_ledger', 'dirty_cash_pool'), 'sql/layer7_faz4_front_business.sql calistirildi mi?'
+    end }
 }
 
 -- ---------------------------------------------------------------------

@@ -1019,4 +1019,69 @@ Config.ComposerSignature = {
     fadeOutMs              = 600   -- introDurationMs'in SON bu kadarlik dilimi: alfa 235'ten 0'a lineer iner
 }
 
+-- =====================================================================
+-- ★★★ SİBER-TAKTİK GÜVENLİK VE SOSYAL OPSEC GENİŞLEMESİ — FAZ 2 ★★★
+-- Aşağıdaki iki blok TAMAMEN YENİ EKLEMELERDİR. Yukarıdaki hiçbir alan/
+-- tablo/formül DEĞİŞTİRİLMEDİ. "0 RNG, Sıfır Sayı Standardı, Katı
+-- Determinizm" felsefesi HARFİYEN korunur.
+-- =====================================================================
+
+-- ---------------------------------------------------------------------
+-- KATMAN 1: DİNAMİK BÜROKRATİK REAKSİYON (BureaucraticVelocity)
+-- server/bureau.lua Matrix.Bureau.GetActiveGangCount/GetBureaucraticVelocity
+-- bu sabitleri okur.
+-- ---------------------------------------------------------------------
+
+-- Referans nokta: aktif çete (raid_ordered=false trap house) sayısı TAM
+-- OLARAK bu değerdeyken velocity=1.0 -- mevcut formüllerin (Tick/
+-- AdvanceDecryption/Livestream) bugüne kadarki davranışıyla BİREBİR AYNI,
+-- geriye dönük uyumlu taban.
+Config.Bureau.BureaucraticReferenceGangCount = 5
+
+-- Şehir kalabalıklaştıkça (n > referans) reaksiyon hızı bu tabanın ALTINA
+-- ASLA inmez -- evrak yükü ne kadar ağır olursa olsun sistem tamamen durmaz.
+Config.Bureau.BureaucraticVelocityFloor = 0.30
+
+-- Tekelleşme (n < referans) sırasında reaksiyon hızı bu tavanın ÜSTÜNE
+-- ASLA çıkmaz -- tek bir çeteye odaklanma bile sınırsız hızlanmaz.
+Config.Bureau.BureaucraticVelocityCeiling = 3.0
+
+-- Kalabalık dalı: velocity = 1 / (1 + log_base(1+excess)) -- "evrak yükü"
+-- arttıkça yavaşlama LOGARİTMİK (talep: "logaritmik yavaşlat").
+Config.Bureau.BureaucraticLoadLogBase = 2.0
+
+-- Tekelleşme dalı: velocity = exp(rate * eksikGangSayisi) -- odaklanma
+-- arttıkça hızlanma ÜSSEL (talep: "üssel olarak tırmandır"), yukarıdaki
+-- Ceiling ile sert tavana kırpılır.
+Config.Bureau.BureaucraticMonopolyGrowthRate = 0.35
+
+-- ---------------------------------------------------------------------
+-- KATMAN 3: PARAVAN İŞLETMELER VE SAHTE FATURA MOTORU
+-- server/bureau.lua Matrix.FrontBusiness bloğunun Config sözleşmesidir.
+-- Config.Market.Zones (Katman 5, DEĞİŞTİRİLMEDİ) İLE AYNI zone_id uzayını
+-- paylaşır -- ikinci bir "zones" tablosu İCAT EDİLMEZ. matrix_zone_ledger'a
+-- (mevcut tablo) sql/layer7_faz4_front_business.sql ile eklenen BAĞIMSIZ
+-- kolonları okur/yazar -- market.lua'nın kendi zone-ekonomisi kolonlarına
+-- (sale_count/gross_revenue/...) HİÇ DOKUNULMAZ.
+-- ---------------------------------------------------------------------
+Config.FrontBusiness = {
+    Businesses = {
+        { zone_id = 1, business_label = 'Liman Dövme ve Cilt Stüdyosu' },
+        { zone_id = 2, business_label = 'Sanayi Hurdalık ve Oto Yedek Parça' },
+        { zone_id = 3, business_label = 'Merkez 7/24 Oto Yıkama' },
+        { zone_id = 4, business_label = 'Banliyö Çatı Tamirat Servisi' }
+    },
+
+    MinInvoiceAmount = 200.0,
+    MaxInvoiceAmount = 15000.0,
+
+    -- Yasal komisyon: taban oran + kasadaki paranın YAŞINA (Config.CashDecay.
+    -- TraceHalfLifeRealDays İLE AYNI yarı-ömür formülü, YENİ bir sabit İCAT
+    -- EDİLMEZ) bağlı ek ceza. Ne kadar eski/bekletilmiş kirli para o kadar
+    -- pahalıya (yüksek komisyonla) temizlenir.
+    BaseCommissionRate     = 0.12,
+    TraceCommissionPenalty = 0.20,
+    MaxCommissionRate      = 0.45
+}
+
 return Config
