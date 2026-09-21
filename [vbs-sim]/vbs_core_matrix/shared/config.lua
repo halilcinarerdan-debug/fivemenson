@@ -1180,4 +1180,62 @@ Config.Mercenary = {
 -- =====================================================================
 Config.Bureau.DeadAgentAutopsyDelaySeconds = 120  -- Büro'nun cesedi/kanıt odasını incelemesi için GERÇEK gecikme (RNG YOK, sabit)
 
+-- =====================================================================
+-- ★★★ FAZ 3 — SON OTURUM ★★★
+-- =====================================================================
+
+-- ---------------------------------------------------------------------
+-- KATMAN 1: OTONOM SLIME ÇETE BÖLÜNMESİ (server/district_hubs.lua
+-- Matrix.DistrictHubs.FragmentTerritory / Matrix.GangLearningCore).
+-- ---------------------------------------------------------------------
+
+-- Bir trap house'un lideri (o eve atanmış EN DÜŞÜK ID'li bot -- deterministik
+-- "kıdem" tanımı, yeni bir rütbe alanı İCAT EDİLMEZ) öldüğünde, hub'lar
+-- dağıtılır ve bu kadar yeni bağımsız slime hücresi doğar. RNG YOK: sabit,
+-- tekrar-üretilebilir bir kural (trap house ID çift/tek) kullanılır -- bkz.
+-- Matrix.DistrictHubs.FragmentTerritory yorumu.
+Config.DistrictHubs.SplinterBaseAggression = 0.4  -- [0,1]; siber sızıntı/pusu biriktiricisinin dakika-başı artışı
+
+-- Her aktif slime hücresinin "pusu ve siber sızıntı döngüsü" bu periyotta
+-- bir çalışır (gerçek saniye).
+Config.DistrictHubs.SplinterCycleSeconds = 90
+
+-- ---------------------------------------------------------------------
+-- KATMAN 2: CONFIG/SERVER.CFG DESTEKLİ BÜRO YOĞUNLUĞU + MAHKEME MOTORU
+-- server/bureau.lua Matrix.Bureau.GetBureaucraticVelocity/Trial* bu
+-- sabitleri okur.
+--
+-- ★ ConVar (server.cfg'den canlı ayarlanır, resource restart GEREKMEZ --
+-- GetConvarFloat her okumada GÜNCEL değeri döner):
+--     set matrix_bureau_intensity "1.0"
+--   1.0 = algoritmanın kendi Floor/Ceiling'i İÇİNDE davranır (varsayılan,
+--   geriye dönük uyumlu). 0'dan büyük herhangi bir değer, Büro'nun NİHAİ
+--   reaksiyon/öğrenme hızını DOĞRUDAN çarpar -- admin bilerek algoritmik
+--   tavanın/tabanın DIŞINA çıkmak isterse (örn. bir etkinlik için) bunu
+--   YAPABİLİR, bu KASITLI bir manuel override'dır.
+-- ---------------------------------------------------------------------
+Config.Bureau.ConvarIntensityFloor   = 0.0   -- negatif/NaN değerlere karşı savunma (asla bunun altına inmez)
+Config.Bureau.ConvarIntensityCeiling = 10.0  -- yanlışlıkla yazılan devasa bir değere karşı sert tavan
+
+Config.Bureau.Trial = {
+    -- matrix_forensic_evidence.match_certainty bu eşiğin ÜSTÜNDEYKEN bir
+    -- "İnkar" cevabı YALAN sayılır (adli kayıtla çapraz kontrol) -- Config.
+    -- Forensics.MatchCertaintyThreshold İLE AYNI DEĞİL, mahkemenin KENDİ
+    -- (daha temkinli) eşiğidir.
+    HighCertaintyThreshold = 0.70,
+
+    -- Conviction Weight (RNG YOK, PropagandaMomentum İLE AYNI geometrik
+    -- büyüme deseni -- yeni bir formül İCAT EDİLMEZ):
+    --   YALAN:  weight' = min(1.0, weight*GeometricFactor + Increment)
+    --   DÜRÜST İTİRAF (düşük kesinlikli kanıt hakkında): weight' =
+    --     max(0.0, weight - HonestyDecay) -- şüpheyi azaltır.
+    GeometricFactor = 1.35,
+    Increment       = 0.12,
+    HonestyDecay    = 0.05,
+
+    -- weight >= 1.0 -> 'Hapishane' state (Character Wipe, KALICI).
+    -- Bu tavan ASLA DEĞİŞMEZ (talep: "%100'de kilitlenecek").
+    ConvictionWipeThreshold = 1.0
+}
+
 return Config

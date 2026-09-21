@@ -893,6 +893,18 @@ function Matrix.Logistics.OnDealerEliminated(botId, cause)
     end
 
 
+    -- ★ [FAZ 3] OTONOM SLIME ÇETE BÖLÜNMESİ: server/district_hubs.lua
+    -- Matrix.DistrictHubs.OnGangLeaderEliminated (guard'lı -- hook yoksa
+    -- davranış BİREBİR ESKİSİ GİBİDİR; hook varsa KENDİSİ ölenin lider olup
+    -- olmadığını doğrular, değilse sessizce hiçbir şey yapmaz).
+    if Matrix.DistrictHubs and Matrix.DistrictHubs.OnGangLeaderEliminated then
+        local ok, err = pcall(Matrix.DistrictHubs.OnGangLeaderEliminated, botId, trapHouseId, cause)
+        if not ok then
+            Matrix.Log('LOGISTICS', '[HATA][FAZ3] OnGangLeaderEliminated cagrisi basarisiz (yutuldu): %s', tostring(err))
+        end
+    end
+
+
     if plateToSeize then
         Matrix.Fleet.SeizeVehicle(plateToSeize, cause, dnaId, lastCoords)
     end

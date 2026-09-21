@@ -1883,6 +1883,80 @@ end, false)
 RegisterKeyMapping('notdefteri', 'Operasyon Not Defterini Ac (F10 disinda dogrudan)', 'keyboard', 'L')
 
 
+-- ★ [FAZ 3] KATMAN 2: MAHKEME / İFADE SORGUSU -- Config.AI_Matrix_Brain.
+-- enabled ne olursa olsun (server tarafı karar verir, client bunu BİLMEZ/
+-- SORMAZ) AYNI ox_lib akışı: her kanıt satırı için İtiraf/İnkar sorulur,
+-- sunucu deterministik Conviction Weight'i günceller. Yeni bir HUD/NUI
+-- paneli ÜRETİLMEZ -- yalnızca lib.alertDialog/lib.registerContext/
+-- lib.inputDialog (ZATEN VAR olan ox_lib bağımlılığı) kullanılır.
+local function OpenTrialEvidenceMenu(trialId, dnaId)
+    local rows = lib.callback.await('matrix:callback:trialEvidence', false, dnaId)
+    local options = {}
+    if type(rows) == 'table' then
+        for _, ev in ipairs(rows) do
+            options[#options + 1] = {
+                title       = ('Kanit #%d [%s] Eslesme:%.3f'):format(ev.id, tostring(ev.evidence_type), tonumber(ev.match_certainty) or 0.0),
+                description = (ev.sealed_as_crime_weapon == 1) and 'MUHURLU -- Buro bu kanita zaten guveniyor' or 'muhurlenmemis',
+                icon        = 'gavel',
+                onSelect    = function()
+                    local choice = lib.alertDialog({
+                        header  = ('Kanit #%d - Ifade'):format(ev.id),
+                        content = 'Bu kanit hakkinda ne diyorsunuz?',
+                        centered = true,
+                        cancel   = true,
+                        labels   = { confirm = 'ITIRAF EDIYORUM', cancel = 'INKAR EDIYORUM' }
+                    })
+                    local response = (choice == 'confirm') and 'confess' or 'deny'
+                    local ok, result = lib.callback.await('matrix:callback:trialSubmit', false, trialId, ev.id, response)
+
+                    if ok and type(result) == 'table' then
+                        lib.notify({
+                            title       = 'Mahkeme',
+                            description = ('Cevap: %s | Yalan:%s | Conviction:%.0f%%%s'):format(
+                                response, tostring(result.lied), result.conviction_weight * 100.0,
+                                result.verdict_reached and ' -- HAPISHANE!' or ''),
+                            type = result.lied and 'error' or 'inform'
+                        })
+                    end
+
+                    if not (ok and result and result.verdict_reached) then
+                        OpenTrialEvidenceMenu(trialId, dnaId)
+                    end
+                end
+            }
+        end
+    end
+    if #options == 0 then
+        options[#options + 1] = { title = 'Bu DNA icin kanit bulunamadi.', disabled = true, icon = 'circle-info' }
+    end
+
+    lib.registerContext({
+        id      = 'matrix_trial_evidence',
+        title   = ('=== DAVA #%s - KANIT SORGUSU ==='):format(tostring(trialId)),
+        menu    = 'matrix_tactical_menu',
+        options = options
+    })
+    lib.showContext('matrix_trial_evidence')
+end
+
+
+local function OpenTrialDialog()
+    local input = lib.inputDialog('Mahkeme / Ifade Sorgusu', {
+        { type = 'input', label = 'Sanik Kimligi (citizenid)', required = true },
+        { type = 'input', label = 'DNA-ID (opsiyonel)', required = false }
+    })
+    if not input or not input[1] then return end
+
+    local trialId = lib.callback.await('matrix:callback:trialOpen', false, input[1], input[2])
+    if not trialId then
+        lib.notify({ title = 'Mahkeme', description = 'Dava acilamadi.', type = 'error' })
+        return
+    end
+
+    OpenTrialEvidenceMenu(trialId, input[2])
+end
+
+
 OpenTacticalMenu = function()
     lib.registerContext({
         id = 'matrix_tactical_menu',
@@ -1929,6 +2003,13 @@ OpenTacticalMenu = function()
                 description = 'Trap house basina birikimli telsiz ihlali/ele gecirilen saflik ve Nukleer Abluka durumu',
                 icon        = 'brain',
                 onSelect    = OpenLearningCoreReport
+            },
+            {
+                -- ★ [FAZ 3] KATMAN 2: Mahkeme / Ifade Motoru.
+                title       = 'Mahkeme / Ifade Sorgusu',
+                description = 'Adli kayitlarla capraz kontrollu deterministik ifade -- Conviction Weight %100 KALICI Hapishane getirir',
+                icon        = 'scale-balanced',
+                onSelect    = OpenTrialDialog
             },
             {
                 title       = 'Sokak Satisi',

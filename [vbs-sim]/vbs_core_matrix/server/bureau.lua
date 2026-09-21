@@ -2199,19 +2199,37 @@ function Matrix.Bureau.GetActiveGangCount()
 end
 
 
+-- ★ [FAZ 3][KATMAN 2] server.cfg destekli canlı yoğunluk çarpanı:
+--   set matrix_bureau_intensity "1.0"
+-- Her çağrıda GÜNCEL ConVar değerini okur (resource restart GEREKMEZ).
+-- 1.0 = algoritmanın KENDİ Floor/Ceiling'i içinde davranır (geriye dönük
+-- uyumlu varsayılan) -- bkz. shared/config.lua Config.Bureau.
+-- ConvarIntensity* yorumu.
+local function GetBureauIntensityConvar()
+    local raw = GetConvarFloat('matrix_bureau_intensity', 1.0)
+    if type(raw) ~= 'number' or raw ~= raw then raw = 1.0 end
+    return Matrix.Clamp(raw, Config.Bureau.ConvarIntensityFloor, Config.Bureau.ConvarIntensityCeiling)
+end
+
 function Matrix.Bureau.GetBureaucraticVelocity()
     local n   = Matrix.Bureau.GetActiveGangCount()
     local ref = math_max(Config.Bureau.BureaucraticReferenceGangCount, 1)
 
+    local velocity
     if n >= ref then
-        local excess   = (n - ref) / ref
-        local velocity = 1.0 / (1.0 + math.log(1.0 + excess, Config.Bureau.BureaucraticLoadLogBase))
-        return math_max(velocity, Config.Bureau.BureaucraticVelocityFloor)
+        local excess = (n - ref) / ref
+        velocity = 1.0 / (1.0 + math.log(1.0 + excess, Config.Bureau.BureaucraticLoadLogBase))
+        velocity = math_max(velocity, Config.Bureau.BureaucraticVelocityFloor)
+    else
+        local scarcity = ref - n
+        velocity = math.exp(Config.Bureau.BureaucraticMonopolyGrowthRate * scarcity)
+        velocity = math_min(velocity, Config.Bureau.BureaucraticVelocityCeiling)
     end
 
-    local scarcity = ref - n
-    local velocity = math.exp(Config.Bureau.BureaucraticMonopolyGrowthRate * scarcity)
-    return math_min(velocity, Config.Bureau.BureaucraticVelocityCeiling)
+    -- ★ ConVar çarpanı EN SONDA uygulanır -- algoritmanın kendi Floor/
+    -- Ceiling'ine DOKUNMAZ, admin BİLEREK bunun dışına çıkmak isterse
+    -- (örn. 1.0 dışı bir intensity) izin verir.
+    return velocity * GetBureauIntensityConvar()
 end
 
 
@@ -2904,6 +2922,307 @@ end
 exports('InvestigateDeadAgentSecret', function(botId, dnaId, trapHouseId, cause)
     return Matrix.Bureau.InvestigateDeadAgentSecret(botId, dnaId, trapHouseId, cause)
 end)
+
+
+-- =====================================================================
+-- ★★★ [FAZ 3] KATMAN 2: CONFIG/SERVER.CFG DESTEKLİ MAHKEME VE İFADE MOTORU ★★★
+-- TAMAMEN YENİ bir EKLEMEDİR. matrix_forensic_evidence/matrix_ballistic_
+-- weapons (server/forensics.lua, DEĞİŞTİRİLMEDİ) HİÇ DOKUNULMAZ -- yalnızca
+-- SALT-OKUNUR olarak okunur. Config.AI_Matrix_Brain.enabled=false iken
+-- (varsayılan) VERDİKT tamamen deterministiktir (RNG YOK); true iken AYNI
+-- deterministik verdikt üzerine, Matrix.Bureau.RunAIAdvisoryPass (yukarıda,
+-- DEĞİŞTİRİLMEDİ) İLE BİREBİR AYNI guard/PerformHttpRequest deseniyle
+-- SADECE anlatı metni (ai_narrative) asenkron olarak zenginleştirilir --
+-- verdiktin KENDİSİ ASLA AI'a bağımlı değildir ("Büro'nun kilit kararı
+-- ASLA bu bloğu beklemez" felsefesiyle BİREBİR AYNI).
+-- =====================================================================
+
+local activeTrials = {}   -- [trialId] = { id, defendant_ref, dna_id, conviction_weight, lie_count, verdict, ai_narrative }
+local dirtyTrials   = {}
+local nextTrialId
+
+
+function Matrix.Bureau.LoadTrialWatermark()
+    local ok, rows = pcall(function()
+        return MySQL.query.await('SELECT COALESCE(MAX(id),0) AS mx FROM matrix_trial_records', {})
+    end)
+    local mx = (ok and rows and rows[1] and tonumber(rows[1].mx)) or 0
+    nextTrialId = mx + 1
+    Matrix.Log('BUREAU', '[FAZ3][MAHKEME] Dava ID watermark: %d', nextTrialId)
+end
+
+CreateThread(function()
+    local ok, err = pcall(Matrix.Bureau.LoadTrialWatermark)
+    if not ok then Matrix.Log('BUREAU', '[HATA][FAZ3][MAHKEME] LoadTrialWatermark basarisiz (yutuldu): %s', tostring(err)) end
+end)
+
+
+-- Sanığın DNA kimliğine bağlı kanıt satırlarını döner -- yeni bir sorgu
+-- deseni İCAT EDİLMEZ, forensics.lua'nın KENDİ tablosu SALT-OKUNUR okunur.
+-- WipeBallisticRecord (namlu değişimi, DEĞİŞTİRİLMEDİ) ile "karartılmış"
+-- kanıtlar zaten bu sorgudan hiç DÖNMEZ (satırlar fiziksel olarak silinmiş
+-- olur) -- "izler karartıldıysa mahkeme onu göremez" doğal olarak sağlanır.
+function Matrix.Bureau.GetEvidenceLinesForDna(dnaId)
+    if type(dnaId) ~= 'string' or dnaId == '' then return {} end
+    local rows = MySQL.query.await(
+        'SELECT id, ballistic_id, evidence_type, match_certainty, sealed_as_crime_weapon, created_at FROM matrix_forensic_evidence WHERE fingerprint_id = ? ORDER BY id DESC LIMIT 20',
+        { dnaId }
+    ) or {}
+    return rows
+end
+
+
+function Matrix.Bureau.OpenTrial(src, defendantRef, dnaId)
+    if type(defendantRef) ~= 'string' or defendantRef == '' then return nil, 'bad_defendant' end
+    if not nextTrialId then return nil, 'not_ready' end
+
+    local id = nextTrialId
+    nextTrialId = nextTrialId + 1
+
+    activeTrials[id] = {
+        id                = id,
+        defendant_ref     = defendantRef,
+        dna_id            = dnaId,
+        conviction_weight = 0.0,
+        lie_count         = 0,
+        verdict           = 'pending',
+        ai_narrative      = nil
+    }
+    dirtyTrials[id] = true
+
+    Matrix.Log('BUREAU', '[FAZ3][MAHKEME] Dava #%d acildi -- Sanik:%s DNA:%s', id, defendantRef, tostring(dnaId))
+    return id
+end
+
+
+-- Oyuncu/bot bir kanıt satırı hakkında İTİRAF EDER ('confess') veya İNKAR
+-- EDER ('deny'). FORMÜL (RNG YOK, PropagandaMomentum İLE AYNI geometrik
+-- büyüme deseni -- yeni bir formül İCAT EDİLMEZ):
+--   match_certainty > HighCertaintyThreshold VE 'deny' -> YALAN (adli
+--     kayıtla çapraz kontrol) -> weight' = min(1, weight*Geometric+Increment)
+--   'confess' (kesinlik farketmeksizin) -> itirafın kendisi suçu doğrular,
+--     AYNI geometrik artışla yükselir, ama YALAN SAYILMAZ (lie_count ARTMAZ).
+--   'deny' VE düşük-kesinlik -> makul şüpheden yararlanma -> weight AZALIR.
+function Matrix.Bureau.SubmitTestimonyClaim(trialId, evidenceId, response)
+    local trial = activeTrials[tonumber(trialId) or -1]
+    if not trial or trial.verdict ~= 'pending' then return false, 'bad_trial' end
+    if response ~= 'confess' and response ~= 'deny' then return false, 'bad_response' end
+
+    local rows = MySQL.query.await('SELECT match_certainty FROM matrix_forensic_evidence WHERE id = ?', { tonumber(evidenceId) }) or {}
+    local certainty = rows[1] and tonumber(rows[1].match_certainty)
+    if not certainty then return false, 'bad_evidence' end
+
+    local highCertainty = certainty > Config.Bureau.Trial.HighCertaintyThreshold
+    local lied = false
+
+    if response == 'deny' and highCertainty then
+        lied = true
+        trial.lie_count = trial.lie_count + 1
+        trial.conviction_weight = math_min(1.0,
+            (trial.conviction_weight * Config.Bureau.Trial.GeometricFactor) + Config.Bureau.Trial.Increment)
+    elseif response == 'confess' then
+        trial.conviction_weight = math_min(1.0,
+            (trial.conviction_weight * Config.Bureau.Trial.GeometricFactor) + Config.Bureau.Trial.Increment)
+    else
+        trial.conviction_weight = math_max(0.0, trial.conviction_weight - Config.Bureau.Trial.HonestyDecay)
+    end
+
+    dirtyTrials[trial.id] = true
+
+    Matrix.Log('BUREAU', '[FAZ3][MAHKEME] Dava #%d | Kanit #%s (kesinlik:%.3f) | Cevap:%s | Yalan:%s | Conviction:%.3f',
+        trial.id, tostring(evidenceId), certainty, response, tostring(lied), trial.conviction_weight)
+
+    local verdictReached = false
+    if trial.conviction_weight >= Config.Bureau.Trial.ConvictionWipeThreshold then
+        verdictReached = true
+        Matrix.Bureau.ExecuteVerdict(trial.id)
+    end
+
+    return true, { lied = lied, conviction_weight = trial.conviction_weight, verdict_reached = verdictReached }
+end
+
+
+-- KALICI 'Hapishane' state (Character Wipe). Config.AI_Matrix_Brain.enabled
+-- ne olursa olsun bu karar DEĞİŞMEZ -- AI yalnızca aşağıdaki anlatı
+-- metnini (varsa) zenginleştirir.
+function Matrix.Bureau.ExecuteVerdict(trialId)
+    local trial = activeTrials[trialId]
+    if not trial or trial.verdict ~= 'pending' then return false end
+
+    trial.verdict = 'convicted'
+    dirtyTrials[trialId] = true
+
+    -- ★ RÜŞVET EKONOMİSİ bloğuyla (yukarıda) AYNI Matrix.QBX:GetPlayer
+    -- kalıbı -- yeni bir oyuncu-erişim altyapısı İCAT EDİLMEZ.
+    if Matrix.PlayerSourceIndex then
+        for src, citizenid in pairs(Matrix.PlayerSourceIndex) do
+            if citizenid == trial.defendant_ref then
+                MySQL.prepare([[
+                    INSERT INTO matrix_player_state (citizenid, cortisol_level, fatigue_level, imprisoned, updated_at)
+                    VALUES (?, 0.0, 0.0, 1, NOW())
+                    ON DUPLICATE KEY UPDATE imprisoned = 1, updated_at = NOW()
+                ]], { citizenid })
+
+                -- ★ DÜRÜST/GÜVENLİ TASARIM: gerçek karakter-silme API'si
+                -- framework sürümüne göre değişir -- burada KÖR bir export
+                -- çağrılıp resource ÇÖKERTİLMEZ. Oyuncu AÇIKÇA bir sebeple
+                -- ATILIR (DropPlayer, HER FiveM sürümünde var olan bir
+                -- native) VE matrix_player_state.imprisoned=1 KALICI olarak
+                -- işaretlenir -- framework'ün kendi karakter-silme/ban akışı
+                -- (varsa) bu bayrağı bir sonraki girişte okuyabilir.
+                pcall(DropPlayer, src, '[BURO] Mahkeme karari: Conviction Weight %100 -- KALICI HAPIS/KARAKTER SILME.')
+                break
+            end
+        end
+    end
+
+    Matrix.Log('BUREAU',
+        '[FAZ3][MAHKEME][HAPISHANE] Dava #%d | Sanik:%s -- Conviction Weight %%100, KALICI HAPIS/CHARACTER WIPE isaretlendi.',
+        trialId, trial.defendant_ref)
+
+    TriggerEvent('matrix:internal:trialVerdictReached', trialId, trial.defendant_ref, 'convicted')
+
+    if Config.AI_Matrix_Brain.enabled then
+        local ok, err = pcall(Matrix.Bureau.RequestTrialNarrative, trialId)
+        if not ok then
+            Matrix.Log('BUREAU', '[HATA][FAZ3][AI] RequestTrialNarrative hata verdi (yutuldu): %s', tostring(err))
+        end
+    end
+
+    return true
+end
+
+
+-- ★ Config.AI_Matrix_Brain.enabled=true iken hakim/savcı botlarının edebi/
+-- hukuki anlatısını üretir -- RunAIAdvisoryPass (yukarıda, DEĞİŞTİRİLMEDİ)
+-- İLE BİREBİR AYNI guard/PerformHttpRequest deseni.
+function Matrix.Bureau.RequestTrialNarrative(trialId)
+    local trial = activeTrials[trialId]
+    if not trial then return end
+
+    if Config.AI_Matrix_Brain.provider ~= 'openai' or not Config.AI_Matrix_Brain.apiKey or Config.AI_Matrix_Brain.apiKey == 'sk-...' then
+        Matrix.Log('BUREAU', '[FAZ3][AI] enabled=true fakat apiKey yapilandirilmamis -- deterministik verdikt DEGISMEDEN gecerli, anlati uretilmedi.')
+        return
+    end
+
+    local body = json.encode({
+        model = 'gpt-4o-mini',
+        messages = {
+            { role = 'system', content = 'You are a courtroom narrator for a GTA roleplay server. Write a short, literary judge/prosecutor verdict narration in Turkish based ONLY on the given deterministic facts. Never invent new facts, never change the verdict.' },
+            { role = 'user', content = json.encode({
+                defendant         = trial.defendant_ref,
+                conviction_weight = trial.conviction_weight,
+                lie_count         = trial.lie_count,
+                verdict           = trial.verdict
+            }) }
+        }
+    })
+
+    PerformHttpRequest('https://api.openai.com/v1/chat/completions', function(statusCode, response)
+        if statusCode ~= 200 then
+            Matrix.Log('BUREAU', '[FAZ3][AI] OpenAI istegi basarisiz (HTTP %s) -- verdikt ETKILENMEDI.', tostring(statusCode))
+            return
+        end
+        local ok, decoded = pcall(json.decode, response)
+        if not ok or type(decoded) ~= 'table' then
+            Matrix.Log('BUREAU', '[FAZ3][AI] OpenAI yaniti cozumlenemedi -- verdikt ETKILENMEDI.')
+            return
+        end
+
+        local narrative = decoded.choices and decoded.choices[1] and decoded.choices[1].message and decoded.choices[1].message.content
+        local t = activeTrials[trialId]
+        if type(narrative) == 'string' and t then
+            t.ai_narrative = narrative
+            dirtyTrials[t.id] = true
+            TriggerEvent('matrix:internal:trialNarrativeReady', t.id, narrative)
+        end
+    end, 'POST', body, {
+        ['Content-Type']  = 'application/json',
+        ['Authorization'] = 'Bearer ' .. Config.AI_Matrix_Brain.apiKey
+    })
+end
+
+
+local function FlushDirtyTrials()
+    local queries = {}
+    for id in pairs(dirtyTrials) do
+        local trial = activeTrials[id]
+        if trial then
+            queries[#queries + 1] = {
+                query = [[
+                    INSERT INTO matrix_trial_records (id, defendant_ref, dna_id, conviction_weight, lie_count, verdict, ai_narrative, resolved_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON DUPLICATE KEY UPDATE
+                        conviction_weight = VALUES(conviction_weight),
+                        lie_count         = VALUES(lie_count),
+                        verdict           = VALUES(verdict),
+                        ai_narrative      = VALUES(ai_narrative),
+                        resolved_at       = VALUES(resolved_at)
+                ]],
+                values = {
+                    id, trial.defendant_ref, trial.dna_id, trial.conviction_weight, trial.lie_count, trial.verdict,
+                    trial.ai_narrative, trial.verdict ~= 'pending' and os_date('%Y-%m-%d %H:%M:%S') or nil
+                }
+            }
+        end
+        dirtyTrials[id] = nil
+    end
+    if #queries == 0 then return end
+    local ok, err = pcall(function() return MySQL.transaction.await(queries) end)
+    if not ok or err == false then
+        Matrix.Log('BUREAU', '[HATA][FAZ3][MAHKEME] FlushDirtyTrials transaction basarisiz (yutulmadi, log icin): %s', tostring(err))
+    end
+end
+
+CreateThread(function()
+    local interval = Config.Persistence.TrapHouseFlushIntervalMs or 20000
+    while true do
+        Wait(interval)
+        FlushDirtyTrials()
+    end
+end)
+
+AddEventHandler('txAdmin:events:serverShuttingDown', function()
+    local ok, err = pcall(FlushDirtyTrials)
+    if not ok then
+        Matrix.Log('BUREAU', '[HATA][FAZ3][MAHKEME] Kapanis flush hata verdi (yutulmadi, log icin): %s', tostring(err))
+    end
+end)
+
+
+lib.callback.register('matrix:callback:trialOpen', function(src, defendantRef, dnaId)
+    return Matrix.Bureau.OpenTrial(src, defendantRef, dnaId)
+end)
+
+lib.callback.register('matrix:callback:trialEvidence', function(src, dnaId)
+    return Matrix.Bureau.GetEvidenceLinesForDna(dnaId)
+end)
+
+lib.callback.register('matrix:callback:trialSubmit', function(src, trialId, evidenceId, response)
+    return Matrix.Bureau.SubmitTestimonyClaim(trialId, evidenceId, response)
+end)
+
+
+RegisterCommand('davadurum', function(src, args)
+    local trialId = tonumber(args[1])
+    local trial = trialId and activeTrials[trialId]
+    if not trial then Reply(src, 'Kullanim: /davadurum [trialId]'); return end
+    Reply(src, ('Dava #%d | Sanik:%s | Conviction:%.3f | Yalan-Sayisi:%d | Verdikt:%s'):format(
+        trialId, trial.defendant_ref, trial.conviction_weight, trial.lie_count, trial.verdict))
+end, false)
+
+-- /davaac [defendantRef] [dnaId] -- diger tum test komutlariyla AYNI disiplin.
+RegisterCommand('davaac', function(src, args)
+    local defendantRef = args[1]
+    local dnaId = args[2]
+    if type(defendantRef) ~= 'string' then Reply(src, 'Kullanim: /davaac [defendantRef] [dnaId]'); return end
+    local id, reason = Matrix.Bureau.OpenTrial(src, defendantRef, dnaId)
+    Reply(src, id and ('Dava #%d acildi.'):format(id) or ('Basarisiz: %s'):format(tostring(reason)))
+end, false)
+
+exports('OpenTrial',             function(src, defendantRef, dnaId) return Matrix.Bureau.OpenTrial(src, defendantRef, dnaId) end)
+exports('SubmitTestimonyClaim',  function(trialId, evidenceId, response) return Matrix.Bureau.SubmitTestimonyClaim(trialId, evidenceId, response) end)
+exports('GetEvidenceLinesForDna',function(dnaId) return Matrix.Bureau.GetEvidenceLinesForDna(dnaId) end)
 
 
 -- =====================================================================

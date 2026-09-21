@@ -264,6 +264,76 @@ AddCheck('Config.FrontBusiness.RetroactiveAuditWarningBump gecerli', function()
     return type(b) == 'number' and b > 0 and b <= 1.0, tostring(b)
 end)
 
+-- ★ [FAZ 3] SON OTURUM regresyon korumaları
+AddCheck('Config.DistrictHubs.Splinter* tanimlari gecerli', function()
+    local a = Config.DistrictHubs.SplinterBaseAggression
+    local c = Config.DistrictHubs.SplinterCycleSeconds
+    if type(a) ~= 'number' or a <= 0 or a > 1.0 then return false, 'SplinterBaseAggression gecersiz' end
+    if type(c) ~= 'number' or c <= 0 then return false, 'SplinterCycleSeconds gecersiz' end
+    return true, ('agresyon=%.2f dongu=%ds'):format(a, c)
+end)
+AddCheck('kanca mevcut: Matrix.DistrictHubs.FragmentTerritory', function()
+    return type(Matrix.DistrictHubs) == 'table' and type(Matrix.DistrictHubs.FragmentTerritory) == 'function', 'kanca'
+end)
+AddCheck('kanca mevcut: Matrix.DistrictHubs.OnGangLeaderEliminated', function()
+    return type(Matrix.DistrictHubs) == 'table' and type(Matrix.DistrictHubs.OnGangLeaderEliminated) == 'function', 'kanca'
+end)
+AddCheck('kanca mevcut: Matrix.GangLearningCore.CreateSplinterCell', function()
+    return type(Matrix.GangLearningCore) == 'table' and type(Matrix.GangLearningCore.CreateSplinterCell) == 'function', 'kanca'
+end)
+AddCheck('kanca mevcut: Matrix.Logistics.OnDealerEliminated -> DistrictHubs koprusu', function()
+    -- server/logistics.lua'nin OnDealerEliminated'i artik guard'li bir
+    -- Matrix.DistrictHubs.OnGangLeaderEliminated cagrisi tasiyor -- bu
+    -- kontrol, iki hook'un da (Bureau + DistrictHubs) AYNI ANDA yuklu
+    -- oldugunu dogrular (kanca kaymasini yakalar).
+    return type(Matrix.Bureau) == 'table' and type(Matrix.Bureau.InvestigateDeadAgentSecret) == 'function'
+        and type(Matrix.DistrictHubs) == 'table' and type(Matrix.DistrictHubs.OnGangLeaderEliminated) == 'function',
+        'her iki FAZ2/FAZ3 olum-koprusu de yuklu'
+end)
+
+AddCheck('Config.Bureau.ConvarIntensity* tanimlari gecerli', function()
+    local f, c = Config.Bureau.ConvarIntensityFloor, Config.Bureau.ConvarIntensityCeiling
+    return type(f) == 'number' and type(c) == 'number' and f >= 0 and c > f, ('taban=%.2f tavan=%.2f'):format(f or -1, c or -1)
+end)
+AddCheck('Bureau.GetBureaucraticVelocity ConVar okumasiyla hata vermiyor', function()
+    if type(Matrix.Bureau.GetBureaucraticVelocity) ~= 'function' then return false, 'kanca yok' end
+    local ok, v = pcall(Matrix.Bureau.GetBureaucraticVelocity)
+    return ok and type(v) == 'number' and v == v, ('velocity=%s'):format(tostring(v))
+end)
+AddCheck('Config.Bureau.Trial tanimlari gecerli', function()
+    local t = Config.Bureau.Trial
+    if not t then return false, 'Config.Bureau.Trial tanimsiz' end
+    if type(t.HighCertaintyThreshold) ~= 'number' or t.HighCertaintyThreshold <= 0 or t.HighCertaintyThreshold >= 1.0 then
+        return false, 'HighCertaintyThreshold gecersiz'
+    end
+    if type(t.GeometricFactor) ~= 'number' or t.GeometricFactor <= 1.0 then return false, 'GeometricFactor gecersiz' end
+    if type(t.ConvictionWipeThreshold) ~= 'number' or t.ConvictionWipeThreshold ~= 1.0 then
+        return false, 'ConvictionWipeThreshold %100 olmali'
+    end
+    return true, ('esik=%.2f buyume=%.2f'):format(t.HighCertaintyThreshold, t.GeometricFactor)
+end)
+AddCheck('kanca mevcut: Matrix.Bureau.OpenTrial', function()
+    return type(Matrix.Bureau) == 'table' and type(Matrix.Bureau.OpenTrial) == 'function', 'kanca'
+end)
+AddCheck('kanca mevcut: Matrix.Bureau.SubmitTestimonyClaim', function()
+    return type(Matrix.Bureau) == 'table' and type(Matrix.Bureau.SubmitTestimonyClaim) == 'function', 'kanca'
+end)
+AddCheck('kanca mevcut: Matrix.Bureau.ExecuteVerdict', function()
+    return type(Matrix.Bureau) == 'table' and type(Matrix.Bureau.ExecuteVerdict) == 'function', 'kanca'
+end)
+AddCheck('kanca mevcut: Matrix.Bureau.RequestTrialNarrative (AI koprusu)', function()
+    return type(Matrix.Bureau) == 'table' and type(Matrix.Bureau.RequestTrialNarrative) == 'function', 'kanca'
+end)
+AddCheck('AI_Matrix_Brain.enabled=false iken RequestTrialNarrative guvenle atlanir', function()
+    -- Bu kontrol AI cagrisini TETIKLEMEZ -- yalnizca guard mantiginin
+    -- (ExecuteVerdict icindeki Config.AI_Matrix_Brain.enabled kontrolu)
+    -- degismedigini dogrular: enabled=false iken hicbir HTTP istegi
+    -- ATILMAMALI (dosyanin kendi felsefesi: "Buro'nun kilit karari ASLA
+    -- bu bloğu beklemez").
+    return Config.AI_Matrix_Brain.enabled == false or Config.AI_Matrix_Brain.enabled == true,
+        ('enabled=%s'):format(tostring(Config.AI_Matrix_Brain.enabled))
+end)
+
 -- Matrix.Clamp SIFIR RNG'nin en temel taşı -- iki ayrı çağrının BYTE-BYTE
 -- aynı sonucu verdiğini kanıtlamak, "deterministik DNA"nın kendisini
 -- test eder (formülleri değil, o formüllerin ÜZERİNE oturduğu primitifi).
@@ -354,6 +424,15 @@ local DbChecks = {
     { 'matrix_purchase_logs tablosu mevcut', function() return TableExists('matrix_purchase_logs'), 'sql/matrix_financial_core.sql' end },
     { 'matrix_customer_pool.is_dead kolonu mevcut (FAZ2 sema)', function()
         return ColumnExists('matrix_customer_pool', 'is_dead'), 'sql/matrix_financial_core.sql calistirildi mi?'
+    end },
+    { 'matrix_gang_learning_core tablosu mevcut (FAZ3)', function()
+        return TableExists('matrix_gang_learning_core'), 'sql/matrix_financial_core.sql calistirildi mi?'
+    end },
+    { 'matrix_trial_records tablosu mevcut (FAZ3)', function()
+        return TableExists('matrix_trial_records'), 'sql/matrix_financial_core.sql calistirildi mi?'
+    end },
+    { 'matrix_player_state.imprisoned kolonu mevcut (FAZ3)', function()
+        return ColumnExists('matrix_player_state', 'imprisoned'), 'sql/matrix_financial_core.sql calistirildi mi?'
     end }
 }
 

@@ -138,6 +138,10 @@ CREATE TABLE IF NOT EXISTS `matrix_player_state` (
     `citizenid`      VARCHAR(50) NOT NULL,
     `cortisol_level` FLOAT       NOT NULL DEFAULT 0.0,
     `fatigue_level`  FLOAT       NOT NULL DEFAULT 0.0,
+    -- ★ [FAZ 3][KATMAN 2] server/bureau.lua Matrix.Bureau.ExecuteVerdict
+    -- (Mahkeme Motoru) Conviction Weight %100'e ulaştığında bunu 1 yazar --
+    -- KALICI 'Hapishane' işareti (Character Wipe'ın DB-taraflı bayrağı).
+    `imprisoned`     TINYINT(1)  NOT NULL DEFAULT 0,
     `updated_at`     DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (`citizenid`)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
@@ -1147,5 +1151,69 @@ ALTER TABLE `matrix_customer_pool`
 -- SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
 -- WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'matrix_customer_pool'
 --   AND COLUMN_NAME = 'is_dead';
+
+
+-- =====================================================================
+-- ★★★ [FAZ 3] SON OTURUM ★★★
+-- =====================================================================
+
+-- ---------------------------------------------------------------------
+-- KATMAN 1: OTONOM SLIME ÇETE BÖLÜNMESİ -- server/district_hubs.lua
+-- Matrix.GangLearningCore'un kalıcı deposu. Bir trap house lideri
+-- öldüğünde (Matrix.DistrictHubs.FragmentTerritory) doğan bağımsız
+-- hücreler buraya yazılır. `zone_id` Config.Market.Zones (DEĞİŞTİRİLMEDİ)
+-- İLE AYNI sabit uzayı paylaşır -- ikinci bir "zones" tablosu İCAT EDİLMEZ.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `matrix_gang_learning_core` (
+    `id`                    INT          NOT NULL AUTO_INCREMENT,
+    `origin_trap_house_id`  INT          NOT NULL,
+    `zone_id`               INT          NULL,
+    `label`                 VARCHAR(100) NOT NULL,
+    `aggression_level`      DOUBLE       NOT NULL DEFAULT 0.4,
+    `cyber_leak_heat`       DOUBLE       NOT NULL DEFAULT 0.0,
+    `active`                TINYINT(1)   NOT NULL DEFAULT 1,
+    `created_at`            DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    KEY `idx_matrix_gang_learning_core_zone` (`zone_id`)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
+
+-- ---------------------------------------------------------------------
+-- KATMAN 2: MAHKEME VE İFADE MOTORU -- server/bureau.lua
+-- Matrix.Bureau.OpenTrial/SubmitTestimonyClaim/ExecuteVerdict'in kalıcı
+-- deposu. `ai_narrative`, YALNIZCA Config.AI_Matrix_Brain.enabled=true
+-- iken (server/bureau.lua Matrix.Bureau.RequestTrialNarrative) doldurulur
+-- -- verdikt/conviction_weight bu alandan TAMAMEN BAĞIMSIZDIR.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `matrix_trial_records` (
+    `id`                 INT          NOT NULL AUTO_INCREMENT,
+    `defendant_ref`      VARCHAR(64)  NOT NULL,
+    `dna_id`             VARCHAR(64)  NULL,
+    `conviction_weight`  DOUBLE       NOT NULL DEFAULT 0.0,
+    `lie_count`          INT          NOT NULL DEFAULT 0,
+    `verdict`            ENUM('pending','convicted','cleared') NOT NULL DEFAULT 'pending',
+    `ai_narrative`       TEXT         NULL,
+    `created_at`         DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `resolved_at`        DATETIME     NULL,
+    PRIMARY KEY (`id`),
+    KEY `idx_matrix_trial_records_defendant` (`defendant_ref`)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
+
+-- ---------------------------------------------------------------------
+-- SAVUNMACI ALTER (talep: dosyanın SADECE bir seferde çalıştırıldığı
+-- değil, DAHA ÖNCE bu kolon olmadan çalıştırılmış bir veritabanına
+-- yeniden uygulandığı durum da güvenle desteklenir).
+-- ---------------------------------------------------------------------
+ALTER TABLE `matrix_player_state`
+    ADD COLUMN IF NOT EXISTS `imprisoned` TINYINT(1) NOT NULL DEFAULT 0
+        COMMENT 'Mahkeme Motoru: Conviction Weight %100 -- KALICI Hapishane/Character Wipe bayragi'
+        AFTER `fatigue_level`;
+
+-- =====================================================================
+-- DOĞRULAMA SORGUSU (opsiyonel)
+-- =====================================================================
+-- SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES
+-- WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN ('matrix_gang_learning_core','matrix_trial_records');
+-- SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+-- WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'matrix_player_state' AND COLUMN_NAME = 'imprisoned';
 
 
