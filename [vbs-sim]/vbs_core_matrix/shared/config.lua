@@ -975,6 +975,19 @@ Config.Forensics.CCTVHackBaseDurationMs           = 12000 -- skill_cyber=0 iken 
 Config.Forensics.CCTVHackSkillDurationFloorMs     = 3000  -- skill_cyber=1.0 iken bile ALTINA inmez
 Config.Forensics.CCTVHackBaseCortisolSpike        = 0.15  -- skill_cyber=0 iken kortizol sicramasi; skill=1.0 iken TAMAMEN engellenir
 
+-- ---------------------------------------------------------------------
+-- [OPSEC-6] MEKANİK MASKE VE ELDİVEN KONTROLÜ (BİYOMETRİK OPSEC)
+-- server/forensics.lua StampTouch/SimulateWeaponFire eldiven kontrolü,
+-- InspectPlayer (mobese/üst arama döngüsü) maske kontrolü için native
+-- kıyafet bileşen kimlikleri. GTA V ped bileşen/prop uzayı SABİTTİR
+-- (oyuncu modeli/kıyafet paketinden bağımsız), bu yüzden burada Config'e
+-- taşınır -- farklı bir kıyafet framework'ü kullanan sunucular tek
+-- satırla ayarlayabilir. RNG YOK: native sorgular saf okumadır.
+-- ---------------------------------------------------------------------
+Config.Forensics.GloveArmsComponentId = 3  -- GetPedDrawableVariation bileseni: kollar (0=cikplak/eldivensiz varsayilan)
+Config.Forensics.MaskFaceComponentId  = 1  -- GetPedDrawableVariation bileseni: maske (0=maskesiz varsayilan)
+Config.Forensics.HelmetPropId         = 0  -- GetPedPropIndex propu: sapka/kask (-1=takili degil)
+
 -- =====================================================================
 -- OTOMASYONLU REGRESYON ÇEKİRDEĞİ (server/matrix_diagnostics.lua)
 -- Hızlı katman (config sınırları + Matrix.* kanca varlığı + salt-okunur
@@ -1017,6 +1030,82 @@ Config.ComposerSignature = {
     counterpointLeadMs     = 2500, -- introDurationMs'in SON bu kadarlik dilimi (sadece rapor 'sealed' ise)
     bulletinLineIntervalMs = 220,  -- taktik bulten satirlarinin akma hizi
     fadeOutMs              = 600   -- introDurationMs'in SON bu kadarlik dilimi: alfa 235'ten 0'a lineer iner
+}
+
+-- =====================================================================
+-- ★★★ SİBER-TAKTİK MİMARİ FAZ 2: KRİMİNAL FİNANS, ADLİ MUHASEBE VE
+-- DİNAMİK HABER BÜLTENİ ★★★
+-- Aşağıdaki iki blok TAMAMEN YENİ EKLEMELERDİR. Config.CashDecay (yukarıda,
+-- Katman 7) ve Config.Recruitment.StreetWhisperMomentumThreshold ZATEN VAR
+-- ve server/market.lua + server/recruitment.lua'da AKTİF çalışıyor --
+-- burada YENİDEN İCAT EDİLMEZ, yalnızca YENİ paravan şirket/mali denetim/
+-- haber bülteni katmanları (server/shell_company.lua, server/
+-- news_bulletin.lua) için sözleşme eklenir. "0 RNG, Sıfır Sayı Standardı"
+-- felsefesi HARFİYEN korunur.
+-- =====================================================================
+
+-- ---------------------------------------------------------------------
+-- [F2-FIN-1] PARAVAN ŞİRKET / SAHTE FATURA AKLAMA MOTORU
+-- (server/shell_company.lua). Aklama, YENİ bir ekonomi hattı İCAT ETMEZ --
+-- MEVCUT Matrix.CashDecay.Launder'ın (server/market.lua, trap house kirli
+-- nakit havuzu) üzerine ince bir "meşru cephe" katmanıdır: oyuncu bir trap
+-- house'un kirli nakdini bu şirket üzerinden yasal banka hesabına aktarır,
+-- Config.CashDecay.LaunderReducesAmount kuralına göre komisyon kesilir.
+-- ---------------------------------------------------------------------
+Config.ShellCompany = {
+    Enabled                  = true,
+
+    MinInvoiceAmount         = 100.0,
+    MaxInvoiceAmount         = 50000.0,
+
+    -- Config.CashDecay.LaunderReducesAmount = true KURALININ somutlaşması:
+    -- her sahte faturada bu oran kadar komisyon KESİLİR (yasal bankaya
+    -- geçen net miktar, faturanın TAMAMI DEĞİLDİR).
+    InvoiceCommissionRate    = 0.12,
+
+    -- ★ ADLİ MUHASEBE ANOMALİSİ: günlük fatura kapasitesi. Bu değerin
+    -- ÜSTÜNE çıkan HER fatura "aşırı/şüpheli yoğunluk" sayılır (bkz.
+    -- Matrix.ShellCompany.RecordInvoice). Kapasite İÇİNDEKİ fatura akışı
+    -- audit_score'u HİÇ ETKİLEMEZ.
+    DailyInvoiceCapacity     = 500,
+
+    -- Bureau.CyberLeakGeometricFactor/PropagandaGeometricFactor İLE AYNI
+    -- "üssel artan risk biriktirici" felsefesi -- yeni bir büyüme modeli
+    -- İCAT EDİLMEZ, aynı desen yeniden kullanılır.
+    AuditGeometricFactor            = 1.20,
+    AuditBaseIncrementPerExcessRatio = 0.08,
+
+    AuditWarningRatio        = 0.5,  -- audit_score bu esigi GECERSE Mali Anomali Alarmi (Audit Warning)
+    AuditWipeRatio           = 1.0,  -- audit_score bu esige ULASINCA Mali Wipe (kalici el koyma)
+
+    FlushIntervalMs          = 20000 -- Config.Persistence.TrapHouseFlushIntervalMs ile AYNI ritim
+}
+
+-- ---------------------------------------------------------------------
+-- [F2-FIN-2] DİNAMİK İSİM HAVUZLU ÖLÜM/KRİMİNAL HABER BÜLTENİ
+-- (server/news_bulletin.lua). İsimler matrix_customer_pool'dan (MEVCUT
+-- "Karanlık Mülakat Müşteri Havuzu" tablosu, YENİ bir isim tablosu İCAT
+-- EDİLMEZ) asenkron çekilir; hangi satırın seçileceği ChecksumOf tabanlı
+-- deterministik bir indeks ile belirlenir (bkz. server/bureau.lua/
+-- blackmarket.lua'nın AYNI ChecksumOf yerel-kopya konvansiyonu) -- ORDER
+-- BY RAND() KULLANILMAZ (0 RNG standardı).
+-- ---------------------------------------------------------------------
+Config.NewsBulletin = {
+    Enabled            = true,
+
+    -- Görevdeki polis can takibi: main.lua RefreshPoliceCache İLE AYNI
+    -- ritimde ayrı bir thread'de (kendi PoliceSources anlık görüntüsünü
+    -- Matrix.GetPoliceSources() üzerinden okur) can düşüşünü (>0 -> <=0)
+    -- yakalar.
+    PoliceHealthPollMs = 1000,
+
+    FlashDurationMs    = 9000,
+    MaxQueuedFlashes   = 5,
+
+    FallbackNames = {
+        'Arthur Pendelton', 'Marlowe Ashcombe', 'Delphine Voss',
+        'Julian Thorncastle', 'Odette Marchetti', 'Gideon Blackwood'
+    }
 }
 
 return Config

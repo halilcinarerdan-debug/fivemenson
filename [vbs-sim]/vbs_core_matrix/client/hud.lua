@@ -1314,6 +1314,124 @@ end
 
 
 -- =====================================================================
+-- ★★★ SİBER-TAKTİK MİMARİ FAZ 2: PARAVAN ŞİRKET / SAHTE FATURA ★★★
+-- (F10 alt menüsü). Sunucu tarafı: server/shell_company.lua. UI tamamen
+-- ox_lib (lib.registerContext + lib.inputDialog) — NUI özel kod YOK.
+-- =====================================================================
+local function OpenShellCompanyRegisterDialog()
+    local input = lib.inputDialog('Paravan Sirket Kur', {
+        { type = 'number', label = 'Bolge ID', description = 'Config.Market.Zones icindeki bolge numarasi', required = true, min = 1 },
+        { type = 'input',  label = 'Isletme Adi', description = 'Sahte hizmet faturasi bu isletme adina kesilecek', required = true }
+    })
+    if not input then return end
+
+    local zoneId       = tonumber(input[1])
+    local businessName = tostring(input[2] or '')
+    if not zoneId or businessName == '' then
+        NotifyInvalidInput('Gecersiz bolge ID veya isletme adi.')
+        return
+    end
+
+    NotifyActionSent('Paravan sirket kaydi gonderiliyor...')
+    local ok, reason = lib.callback.await('matrix:callback:shellco:registerBusiness', false, zoneId, businessName)
+    if lib and lib.notify then
+        lib.notify({
+            title       = '[PARAVAN SIRKET]',
+            description = ok and ('"%s" kuruldu (bolge #%d).'):format(businessName, zoneId)
+                             or ('Kurulamadi: %s'):format(tostring(reason)),
+            type        = ok and 'success' or 'error'
+        })
+    end
+end
+
+
+local function OpenShellCompanyInvoiceDialog()
+    local input = lib.inputDialog('Sahte Hizmet Faturasi Kes', {
+        { type = 'number', label = 'Trap House ID', description = 'Kirli nakdin cekilecegi trap house', required = true, min = 1 },
+        { type = 'number', label = 'Fatura Tutari', description = ('%.0f - %.0f arasi'):format(Config.ShellCompany.MinInvoiceAmount, Config.ShellCompany.MaxInvoiceAmount), required = true, min = 1 }
+    })
+    if not input then return end
+
+    local trapHouseId = tonumber(input[1])
+    local amount       = tonumber(input[2])
+    if not trapHouseId or not amount then
+        NotifyInvalidInput('Gecersiz trap house ID veya tutar.')
+        return
+    end
+
+    NotifyActionSent('Sahte fatura isleniyor...')
+    local ok, result = lib.callback.await('matrix:callback:shellco:issueInvoice', false, trapHouseId, amount)
+    if lib and lib.notify then
+        lib.notify({
+            title       = '[SAHTE FATURA]',
+            description = ok
+                and ('Brut:%.0f Komisyon:-%.0f Net-Bankaya:+%.0f | Denetim skoru:%.2f'):format(
+                        result.gross_amount, result.commission, result.net_amount, result.audit_score)
+                or ('Basarisiz: %s'):format(tostring(result)),
+            type     = ok and 'success' or 'error',
+            duration = 8000
+        })
+    end
+end
+
+
+local function OpenShellCompanyStatusReport()
+    local status = lib.callback.await('matrix:callback:shellco:getStatus', false)
+    if type(status) ~= 'table' then
+        NotifyInvalidInput('Kayitli bir paravan sirketiniz yok. Once "Paravan Sirket Kur" secenegini kullanin.')
+        return
+    end
+
+    local options = {
+        { title = ('Isletme: %s'):format(status.business_name), disabled = true, icon = 'building' },
+        { title = ('Temiz Bakiye: %.0f'):format(status.clean_balance), disabled = true, icon = 'sack-dollar' },
+        { title = ('Kirli Nakit Havuzu: %.0f'):format(status.dirty_cash_pool), disabled = true, icon = 'money-bill-wave' },
+        { title = ('Bugunku Fatura: %d / %d'):format(status.invoices_today, Config.ShellCompany.DailyInvoiceCapacity), disabled = true, icon = 'file-invoice-dollar' },
+        { title = ('Denetim Skoru: %.1f%%'):format(status.audit_score * 100.0), disabled = true, icon = 'magnifying-glass-chart' },
+        { title = status.is_wiped and 'MALI WIPE UYGULANDI' or ('Uyari Seviyesi: %d'):format(status.warning_level), disabled = true, icon = status.is_wiped and 'triangle-exclamation' or 'shield-halved' }
+    }
+
+    lib.registerContext({
+        id      = 'matrix_shellco_status',
+        title   = '=== PARAVAN SIRKET DURUMU ===',
+        menu    = 'matrix_shellco_menu',
+        options = options
+    })
+    lib.showContext('matrix_shellco_status')
+end
+
+
+local function OpenShellCompanyMenu()
+    lib.registerContext({
+        id    = 'matrix_shellco_menu',
+        title = '=== PARAVAN SIRKET ===',
+        menu  = 'matrix_tactical_menu',
+        options = {
+            {
+                title       = 'Paravan Sirket Kur',
+                description = 'Bir bolgede yasal gorunumlu bir paravan isletme kaydet',
+                icon        = 'building-circle-check',
+                onSelect    = OpenShellCompanyRegisterDialog
+            },
+            {
+                title       = 'Sahte Hizmet Faturasi Kes',
+                description = 'Trap house kirli nakdini komisyon kesintisiyle yasal bankaya akla',
+                icon        = 'file-invoice-dollar',
+                onSelect    = OpenShellCompanyInvoiceDialog
+            },
+            {
+                title       = 'Sirket Durumu',
+                description = 'Bakiye, gunluk fatura sayaci ve mali denetim skorunu goruntule',
+                icon        = 'chart-pie',
+                onSelect    = OpenShellCompanyStatusReport
+            }
+        }
+    })
+    lib.showContext('matrix_shellco_menu')
+end
+
+
+-- =====================================================================
 -- ★★★ KATMAN 7 FAZ 2: PAKETLEME ODASI (F10) ★★★
 -- =====================================================================
 local function SanitizePackagingProductArg(v)
@@ -1844,6 +1962,12 @@ OpenTacticalMenu = function()
                 onSelect    = OpenRegionalFinancialReport
             },
             {
+                title       = 'Paravan Sirket',
+                description = 'Yasal gorunumlu paravan isletme kur, sahte fatura kesip kirli nakdi akla, mali denetim durumunu izle',
+                icon        = 'building-shield',
+                onSelect    = OpenShellCompanyMenu
+            },
+            {
                 title       = 'Paketleme Odasi (Parti Uret)',
                 description = 'Trap house deposundaki ham partiyi kesme ajaniyla karistirip kurye paketlerine (meth_bag/coke_brick) donustur',
                 icon        = 'box-open',
@@ -1961,6 +2085,57 @@ CreateThread(function()
             end
 
 
+            Wait(0)
+        else
+            Wait(500)
+        end
+    end
+end)
+
+
+-- =====================================================================
+-- ★★★ SİBER-TAKTİK MİMARİ FAZ 2: DİNAMİK HABER BÜLTENİ ★★★
+-- F10 HUD'un KENDİSİNDEN BAĞIMSIZ, ekranın ALT BANDINDA (y=0.94) akan
+-- edebi/milsim flaş haber şeridi -- server/news_bulletin.lua
+-- 'matrix:client:newsFlash' event'i tetikler. HUD kapalıyken bile (Wait(500)
+-- yerine) görünür kalması gerektiğinden ayrı bir thread'dir; kuyruk boşken
+-- Wait(500) ile neredeyse 0 Resmon, bir bülten görüntülenirken Wait(0) ile
+-- per-frame DrawText.
+-- =====================================================================
+local NewsFlashQueue = {}
+
+
+RegisterNetEvent('matrix:client:newsFlash', function(data)
+    if type(data) ~= 'table' or type(data.text) ~= 'string' or data.text == '' then return end
+    if #NewsFlashQueue >= ((Config.NewsBulletin and Config.NewsBulletin.MaxQueuedFlashes) or 5) then
+        table.remove(NewsFlashQueue, 1) -- ★ [S2] İLE AYNI disiplin: en eski atilir, RAM-bomb YOK
+    end
+    NewsFlashQueue[#NewsFlashQueue + 1] = {
+        text     = data.text,
+        duration = tonumber(data.duration) or (Config.NewsBulletin and Config.NewsBulletin.FlashDurationMs) or 9000
+    }
+end)
+
+
+CreateThread(function()
+    local activeFlash    = nil
+    local activeUntilMs  = 0
+
+
+    while true do
+        if not activeFlash and #NewsFlashQueue > 0 then
+            activeFlash   = table.remove(NewsFlashQueue, 1)
+            activeUntilMs = GetGameTimer() + activeFlash.duration
+        end
+
+
+        if activeFlash then
+            if GetGameTimer() >= activeUntilMs then
+                activeFlash = nil
+            else
+                DrawMonoLine(0.03, 0.94, ('[HABER] %s'):format(activeFlash.text),
+                    COLOR_DANGER[1], COLOR_DANGER[2], COLOR_DANGER[3], 0.32)
+            end
             Wait(0)
         else
             Wait(500)

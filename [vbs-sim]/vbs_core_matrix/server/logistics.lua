@@ -835,9 +835,20 @@ end)
 -- =====================================================================
 -- KALICI ÖLÜM (PERMADEATH & HARD-DELETE)
 -- =====================================================================
+-- ★ FAZ 2: bu sebep kümesindeki bir eleme GERÇEK bir "öldürme" sayılır
+-- (bkz. Matrix.News.OnCivilianBotEliminated) -- 'retired'/'command_purge'
+-- gibi idari/test amaçlı temizlikler haber bülteni TETİKLEMEZ.
+local LETHAL_ELIMINATION_CAUSES = { combat = true, police_collision = true, police_busted = true }
+
+
 function Matrix.Logistics.OnDealerEliminated(botId, cause)
     local bot = Matrix.Bots[botId]
     if not bot then return false end
+
+
+    if LETHAL_ELIMINATION_CAUSES[cause] and Matrix.News and Matrix.News.OnCivilianBotEliminated then
+        pcall(Matrix.News.OnCivilianBotEliminated, botId, bot, cause)
+    end
 
 
     if Matrix.Dispatches and Matrix.Dispatches[botId] then

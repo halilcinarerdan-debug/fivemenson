@@ -826,6 +826,17 @@ local function RefreshPoliceCache()
 end
 
 
+-- ★ FAZ 2 [HABER BÜLTENİ KÖPRÜSÜ]: server/news_bulletin.lua'nın görevdeki
+-- polis can takibi için PoliceSources'ı OKUMASI gerekir; bu dosyanın
+-- kendisi local'dir (RefreshPoliceCache İLE AYNI dosya-yerel önbellek
+-- deseni), bu yüzden salt-okunur bir getter dışa açılır -- döndürülen
+-- tablo ÇAĞIRANA KOPYALANMAZ (referans), ama news_bulletin.lua yalnızca
+-- pairs() ile okur, hiç yazmaz.
+function Matrix.GetPoliceSources()
+    return PoliceSources
+end
+
+
 CreateThread(function()
     while true do
         Wait(5000)

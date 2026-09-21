@@ -144,6 +144,49 @@ local function GetActorCortisol(actor)
 end
 
 
+-- =====================================================================
+-- ★ [OPSEC-6] MEKANİK MASKE VE ELDİVEN KONTROLÜ (BİYOMETRİK OPSEC)
+-- YALNIZCA gerçek oyunculara uygulanır (actorRef.kind=='player') -- bir
+-- botun (Matrix.Bots) kıyafet/eldiven kavramı YOKTUR, sadece state.coords
+-- taşır. GetPedDrawableVariation/GetPedPropIndex, main.lua
+-- RefreshPoliceCache'in GetEntityCoords(policePed) İLE AYNI disiplinle,
+-- ağ üzerinden replike edilmiş ped durumunu okuduğu için SUNUCU TARAFINDA
+-- güvenle çağrılabilir. pcall ile sarmalanır: kıyafet freamwork'ü
+-- bileşen indeksini beklenmedik döndürürse (ör. ped henüz stream
+-- edilmemiş) sessizce "eldiven/maske YOK" varsayılır -- ÇÖKMEZ.
+-- =====================================================================
+local function GetActorPed(actorRef)
+    if type(actorRef) ~= 'table' or actorRef.kind ~= 'player' then return nil end
+    local src = actorRef.source
+    if type(src) ~= 'number' or src <= 0 then return nil end
+    local ped = GetPlayerPed(src)
+    if not ped or ped == 0 then return nil end
+    return ped
+end
+
+
+-- FORMÜL YOK -- saf native okuma. GloveArmsComponentId (varsayılan 3 =
+-- "kollar") 0 dışında bir varyasyon taşıyorsa eldivenli sayılır.
+local function IsWearingGloves(actorRef)
+    local ped = GetActorPed(actorRef)
+    if not ped then return false end
+    local ok, variation = pcall(GetPedDrawableVariation, ped, Config.Forensics.GloveArmsComponentId)
+    return ok and type(variation) == 'number' and variation ~= 0
+end
+
+
+-- Maske (yüz bileşeni != 0) VEYA kask/şapka (prop takılı, index != -1)
+-- varsa maskeli/gizlenmiş sayılır.
+local function IsWearingMaskOrHelmet(actorRef)
+    local ped = GetActorPed(actorRef)
+    if not ped then return false end
+    local okMask, maskVar = pcall(GetPedDrawableVariation, ped, Config.Forensics.MaskFaceComponentId)
+    if okMask and type(maskVar) == 'number' and maskVar ~= 0 then return true end
+    local okProp, propIdx = pcall(GetPedPropIndex, ped, Config.Forensics.HelmetPropId)
+    return okProp and type(propIdx) == 'number' and propIdx ~= -1
+end
+
+
 -- ★ KATMAN 5: silahın KENDİ canı (ox_inventory item durability, [0,100])
 -- weaponInventoryId/weaponSlot üzerinden okunur ve [0,1]'e normalize edilir.
 -- Metadata yoksa (silah hiç ateşlenmemiş/canı hiç ayarlanmamış) varsayılan
@@ -380,8 +423,15 @@ function Matrix.Forensics.SimulateWeaponFire(actorRef, weaponSerial, weaponWear,
     local qKovan = Matrix.Clamp(qKovanBase * weaponDurability, 0.0, 1.0)
 
 
-    local fingerprintQuality = Matrix.Forensics.ComputeFingerprintQuality(actor)
+    -- ★ [OPSEC-6] Eldiven kontrolü: eldivenli ateş eden bir oyuncu parmak
+    -- izi BIRAKMAZ -- fingerprint_quality KESİN OLARAK 0.0'a sabitlenir ve
+    -- veritabanına yazılan fingerprint_id (dnaId'nin KENDİSİ DEĞİL, ayrı
+    -- bir kayıt alanı) 'UNKNOWN' basılır. dnaId'nin kendisi (DNA/kovan
+    -- kimliği, parmak izinden BAĞIMSIZ bir kanıt vektörü) DEĞİŞTİRİLMEZ.
+    local glovesOn           = IsWearingGloves(actorRef)
+    local fingerprintQuality = glovesOn and 0.0 or Matrix.Forensics.ComputeFingerprintQuality(actor)
     local dnaId              = GetActorDnaId(actor)
+    local fingerprintIdForRecord = glovesOn and 'UNKNOWN' or dnaId
     local matchCertainty     = Matrix.Clamp(qKovan * Config.BallisticStriationPrecision, 0.0, 1.0)
 
 
@@ -416,7 +466,7 @@ function Matrix.Forensics.SimulateWeaponFire(actorRef, weaponSerial, weaponWear,
                  match_certainty, sealed_as_crime_weapon, coords_x, coords_y, coords_z, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
         ]], {
-            evidenceId, ballisticId, evidenceType, qKovan, dnaId, fingerprintQuality,
+            evidenceId, ballisticId, evidenceType, qKovan, fingerprintIdForRecord, fingerprintQuality,
             matchCertainty, sealed and 1 or 0, cx, cy, cz
         })
     else
@@ -427,7 +477,7 @@ function Matrix.Forensics.SimulateWeaponFire(actorRef, weaponSerial, weaponWear,
                  match_certainty, sealed_as_crime_weapon, coords_x, coords_y, coords_z, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
         ]], {
-            ballisticId, evidenceType, qKovan, dnaId, fingerprintQuality,
+            ballisticId, evidenceType, qKovan, fingerprintIdForRecord, fingerprintQuality,
             matchCertainty, sealed and 1 or 0, cx, cy, cz
         })
     end
@@ -713,8 +763,11 @@ function Matrix.Forensics.StampTouch(actorRef, inventoryId, slot)
     if not inventoryId or type(slot) ~= 'number' then return nil end
 
 
-    local q  = Matrix.Forensics.ComputeFingerprintQuality(actor)
-    local dna= GetActorDnaId(actor)
+    -- ★ [OPSEC-6] Eldivenli dokunuş parmak izi bırakmaz: fingerprint_quality
+    -- KESİN OLARAK 0.0, veritabanına yazılan fingerprint_id 'UNKNOWN'.
+    local glovesOn = IsWearingGloves(actorRef)
+    local q  = glovesOn and 0.0 or Matrix.Forensics.ComputeFingerprintQuality(actor)
+    local dna= glovesOn and 'UNKNOWN' or GetActorDnaId(actor)
 
 
     Matrix.Inventory.MergeMetadata(inventoryId, slot, {
@@ -1313,6 +1366,27 @@ function Matrix.Forensics.InspectPlayer(officerSrc, suspectSrc)
     end
 
 
+    -- ★ [OPSEC-6] MOBESE TARAMASI: kontrabant bulunup bulunmadığından
+    -- BAĞIMSIZDIR -- dwell'i tamamlanan HER şüpheli, o an bulunduğu
+    -- bölgenin mobese dağıtım kutusuna bir kıyafet/maske gözlemi bırakır
+    -- (bkz. sql/matrix_financial_core.sql matrix_cctv_logs). Bölge tespit
+    -- edilemezse (harita dışı/tanımsız bölge) sessizce atlanır.
+    do
+        local suspectCoordsForCctv = ped and ped ~= 0 and GetEntityCoords(ped) or nil
+        local cctvZoneId = suspectCoordsForCctv and Matrix.Market and Matrix.Market.FindNearestZone
+            and Matrix.Market.FindNearestZone(suspectCoordsForCctv)
+        if cctvZoneId then
+            local cctvActor = Matrix.ResolveActor({ kind = 'player', source = suspectSrc })
+            local cctvDnaId = (cctvActor and cctvActor.dna_id) or 'UNKNOWN'
+            local masked    = IsWearingMaskOrHelmet({ kind = 'player', source = suspectSrc })
+            MySQL.insert(
+                'INSERT INTO matrix_cctv_logs (zone_id, dna_id, masked, clothing_tag, created_at) VALUES (?, ?, ?, ?, NOW())',
+                { cctvZoneId, cctvDnaId, masked and 1 or 0, masked and 'masked' or 'unmasked' }
+            )
+        end
+    end
+
+
     if #findings == 0 then
         Reply(officerSrc, 'Ust arama tamamlandi: kontrabant bulunamadi.')
         return false
@@ -1582,8 +1656,10 @@ end
 -- Config.Market.Zones id-uzayı, YENİ bir bölge kavramı İCAT EDİLMEZ)
 -- mobese dağıtım kutularına sızar; başarılı tetiklenmede o bölgedeki son
 -- 30 dakikaya ait MASKESİZ/ŞÜPHELİ kıyafet eşleşme geçmişini
--- (matrix_cctv_logs, bkz. sql/matrix_cctv_network.sql) siler. Maskeli
--- (zaten gizlenmiş) veya 30 dakikadan eski kayıtlara DOKUNULMAZ.
+-- (matrix_cctv_logs, bkz. sql/matrix_financial_core.sql) siler. Maskeli
+-- (zaten gizlenmiş) veya 30 dakikadan eski kayıtlara DOKUNULMAZ. ★ [OPSEC-6]
+-- Bu tabloya artık Matrix.Forensics.InspectPlayer'ın (üst arama/mobese
+-- döngüsü, aşağıda) GERÇEK maske/kask gözlemleri yazılır.
 -- =====================================================================
 function Matrix.Forensics.HackCCTVNetwork(actorRef, zoneId)
     zoneId = tonumber(zoneId)
@@ -1735,9 +1811,11 @@ RegisterCommand('mobesehackle', function(src, args)
 end, false)
 
 
--- /cctvkaydet [zoneId] [dnaId] [maskeli 0|1] [kiyafetEtiketi] -- gercek bir
--- algilama motoru OLMADAN (KAPSAM DISI, bkz. dosya-basi OPSEC yorumu)
--- matrix_cctv_logs'a test amacli bir satir yazar.
+-- /cctvkaydet [zoneId] [dnaId] [maskeli 0|1] [kiyafetEtiketi] -- elle test
+-- amaçlı bir satır yazar. ★ [OPSEC-6] GÜNCELLEMESİ: artık GERÇEK bir
+-- algılama motoru da VAR (Matrix.Forensics.InspectPlayer, aşağıda -- her
+-- üst arama dwell'inde GetPedDrawableVariation/GetPedPropIndex ile
+-- otomatik yazar); bu komut yalnızca ek/manuel senaryo testi için kalır.
 RegisterCommand('cctvkaydet', function(src, args)
     local zoneId = tonumber(args[1])
     local dnaId  = args[2]
