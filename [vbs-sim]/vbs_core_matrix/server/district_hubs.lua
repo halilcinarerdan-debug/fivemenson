@@ -248,3 +248,62 @@ CreateThread(function()
         end
     end
 end)
+
+-- =====================================================================
+-- ★★★ [FAZ 2] KATMAN 3: ON-DEMAND LOJİSTİK SEVK EMRİ (TEK SEFERLİK) ★★★
+-- TAMAMEN YENİ bir EKLEMEDİR. Yukarıdaki periyodik ticker (Config.
+-- DistrictHubs.DemandCycleSeconds, DEĞİŞTİRİLMEDİ) hâlâ pasif ekonomi
+-- simülasyonu olarak çalışmaya devam eder -- bu, ONUN YERİNE GEÇMEZ, EK
+-- bir yoldur: talep "Lojistik sevkiyat SADECE oyuncu F10 menüsünden emir
+-- verdiğinde TEK SEFERLİK başlatılmalı" -- bu fonksiyon TAM OLARAK budur,
+-- ProcessHubDemandCycle'ın (yukarıda, DEĞİŞTİRİLMEDİ) AYNI mantığını,
+-- ticker'ı BEKLEMEDEN, oyuncunun tetiklediği AN bir kez çalıştırır. Yeni
+-- bir ekonomi formülü İCAT EDİLMEZ.
+-- =====================================================================
+function Matrix.DistrictHubs.TriggerDispatch(src, hubId)
+    hubId = tonumber(hubId)
+    local hub = hubId and Hubs[hubId]
+    if not hub then return false, 'bad_hub' end
+    if not hub.active then return false, 'hub_inactive' end
+    if hub.locked then return false, 'hub_locked' end
+    if Matrix.Bureau and Matrix.Bureau.IsLockedDown and Matrix.Bureau.IsLockedDown(hub.trap_house_id) then
+        return false, 'bureau_lockdown'
+    end
+
+    local ok, err = pcall(ProcessHubDemandCycle, hubId, hub)
+    if not ok then
+        Matrix.Log('DISTRICT_HUB', '[HATA][FAZ2] TriggerDispatch (on-demand) #%d hata verdi (yutuldu): %s', hubId, tostring(err))
+        return false, 'processing_error'
+    end
+
+    Matrix.Log('DISTRICT_HUB', '[FAZ2][ON-DEMAND] Hub #%d icin tek seferlik lojistik sevk emri islendi (src=%s).',
+        hubId, tostring(src))
+    return true
+end
+
+lib.callback.register('matrix:callback:districtHubsDispatch', function(src, hubId)
+    return Matrix.DistrictHubs.TriggerDispatch(src, hubId)
+end)
+
+-- /lojistiksevket [hubId] -- F10 "Lojistik Sevk Emri Ver" arka ucu; diğer
+-- tüm test komutlarıyla AYNI disiplin (kısıtlama YOK, ACE'ye bırakılır).
+RegisterCommand('lojistiksevket', function(src, args)
+    local hubId = tonumber(args[1])
+    if not hubId then Reply(src, 'Kullanim: /lojistiksevket [hubId]'); return end
+
+    local ok, reason = Matrix.DistrictHubs.TriggerDispatch(src, hubId)
+    if ok then
+        Reply(src, ('Hub #%d icin tek seferlik lojistik sevk emri islendi.'):format(hubId))
+    else
+        local reasons = {
+            bad_hub          = 'Gecersiz hub ID.',
+            hub_inactive     = 'Hub aktif degil.',
+            hub_locked       = 'Hub kilitli (Buro Ablukasi).',
+            bureau_lockdown  = 'Baglantili trap house Buro Kilidi altinda.',
+            processing_error = 'Isleme hatasi (log dosyasina bakin).'
+        }
+        Reply(src, ('Sevk basarisiz: %s'):format(reasons[reason] or tostring(reason)))
+    end
+end, false)
+
+exports('TriggerHubDispatch', function(src, hubId) return Matrix.DistrictHubs.TriggerDispatch(src, hubId) end)

@@ -2121,11 +2121,26 @@ end
 --- yükselir, SERT TAVAN Config.Bureau.FearCoefficientSnitchCeiling (%95)
 --- ile kırpılır — taban eşiğin ALTINA ASLA inmez (korku yalnızca direnci
 --- ARTIRIR, hiç azaltmaz).
-function Matrix.Bureau.GetEffectiveSnitchThreshold()
+-- ★ [FAZ 2][KATMAN 2 KÖPRÜSÜ] `botId` OPSİYONELDİR -- verilmezse (ESKİ tüm
+-- çağrı yerleri, main.lua/kitchen.lua'nın diğer okumaları) davranış BİREBİR
+-- ESKİSİ GİBİDİR. Verilirse, server/kitchen.lua Matrix.Kitchen.WarnAgent'ın
+-- yazdığı per-bot `warning_snitch_sensitivity` (dopamin düşüşü ile artan,
+-- "kırılma direncini hassaslaştırma" talebi) efektif eşiği AYRICA düşürür --
+-- şehir-geneli FearCoefficient formülünün KENDİSİ (yukarıda) DEĞİŞTİRİLMEDİ.
+function Matrix.Bureau.GetEffectiveSnitchThreshold(botId)
     local base    = Config.Kitchen.SnitchThreshold
     local ceiling = CfgBureau('FearCoefficientSnitchCeiling', 0.95)
     local raised  = base + ((ceiling - base) * cachedFearCoefficient)
-    return Matrix.Clamp(raised, base, ceiling)
+    local threshold = Matrix.Clamp(raised, base, ceiling)
+
+    if botId then
+        local bot = Matrix.Bots and Matrix.Bots[tonumber(botId)]
+        if bot and bot.warning_snitch_sensitivity and bot.warning_snitch_sensitivity > 0.0 then
+            threshold = math_max(threshold - bot.warning_snitch_sensitivity, base * 0.1)
+        end
+    end
+
+    return threshold
 end
 
 
@@ -2262,7 +2277,13 @@ local function GetFrontBusinessState(zoneId)
             business_label     = cfg and cfg.business_label or ('Isletme #%d'):format(zoneId),
             clean_balance      = 0.0,
             dirty_cash_pool    = 0.0,
-            dirty_deposited_at = nil
+            dirty_deposited_at = nil,
+            -- ★ [FAZ 2][KATMAN 4]: matrix_zone_inspectors'tan AYRI bir
+            -- Matrix.FrontBusiness.LoadAuditState() ile doldurulur (bkz.
+            -- dosya sonu) -- burada yalnızca güvenli varsayılanlar.
+            audit_score        = 0.0,
+            warning_level      = 0,
+            is_wiped           = false
         }
         frontBusinesses[zoneId] = state
     end
@@ -2372,6 +2393,9 @@ function Matrix.FrontBusiness.ClaimBusiness(src, zoneId)
     if not playerState or not playerState.citizenid then return false, 'player_unresolved' end
 
     local state = GetFrontBusinessState(zoneId)
+    -- ★ [FAZ 2][KATMAN 4] Mali Wipe KALICIDIR -- el konulan bir paravan
+    -- işletme bir daha ASLA sahiplenilemez.
+    if state.is_wiped then return false, 'business_wiped' end
     if state.owner_citizenid and state.owner_citizenid ~= playerState.citizenid then
         return false, 'already_owned'
     end
@@ -2409,6 +2433,7 @@ function Matrix.FrontBusiness.DepositDirtyCash(src, zoneId, amount)
     if not playerState or not playerState.citizenid then return false, 'player_unresolved' end
 
     local state = GetFrontBusinessState(zoneId)
+    if state.is_wiped then return false, 'business_wiped' end
     if state.owner_citizenid ~= playerState.citizenid then return false, 'not_owner' end
 
     if not ChargeFrontBusinessCash(src, amount) then return false, 'insufficient_cash' end
@@ -2457,6 +2482,7 @@ function Matrix.FrontBusiness.IssueFakeInvoice(src, zoneId, amount)
     if not playerState or not playerState.citizenid then return false, 'player_unresolved' end
 
     local state = GetFrontBusinessState(zoneId)
+    if state.is_wiped then return false, 'business_wiped' end
     if state.owner_citizenid ~= playerState.citizenid then return false, 'not_owner' end
     if amount > state.dirty_cash_pool then return false, 'insufficient_dirty_pool' end
 
@@ -2480,6 +2506,11 @@ function Matrix.FrontBusiness.IssueFakeInvoice(src, zoneId, amount)
     if ok and player then
         paid = pcall(function() player.Functions.AddMoney('bank', netClean, 'front-business-invoice') end)
     end
+
+    -- ★ [FAZ 2][KATMAN 4] Her fatura, günlük anomali sayacını besler ve
+    -- kalıcı bir matrix_purchase_logs kaydı bırakır -- bkz. dosya sonu
+    -- Matrix.FrontBusiness.RecordAuditableInvoice/EvaluateAudit.
+    Matrix.FrontBusiness.RecordAuditableInvoice(zoneId, playerState.citizenid, amount)
 
     -- ★ Pasif server-içi yayın (raidIssued/bureauLockdown İLE AYNI desen) --
     -- gelecekteki dinleyiciler (varsa) için; hiçbiri dinlemese de zararsızdır.
@@ -2568,3 +2599,337 @@ end, false)
 exports('ClaimFrontBusiness',   function(src, zoneId) return Matrix.FrontBusiness.ClaimBusiness(src, zoneId) end)
 exports('DepositFrontBusiness', function(src, zoneId, amount) return Matrix.FrontBusiness.DepositDirtyCash(src, zoneId, amount) end)
 exports('InvoiceFrontBusiness', function(src, zoneId, amount) return Matrix.FrontBusiness.IssueFakeInvoice(src, zoneId, amount) end)
+
+
+-- =====================================================================
+-- ★★★ [FAZ 2] KATMAN 1 KÖPRÜSÜ: MAAŞ/ZİMMET KASA ARABİRİMİ ★★★
+-- TAMAMEN YENİ bir EKLEMEDİR. server/kitchen.lua Matrix.Kitchen.
+-- ProcessMercenaryEconomy (Ajan Maaşları/Zimmet) bu ikisini çağırır --
+-- kasa mutasyonu (clean_balance) SADECE burada, TEK yerde yapılır.
+-- =====================================================================
+function Matrix.FrontBusiness.PayWage(zoneId, amount)
+    zoneId = tonumber(zoneId)
+    amount = tonumber(amount)
+    if not zoneId or not GetFrontBusinessConfig(zoneId) then return false end
+    if not amount or amount ~= amount or amount <= 0.0 then return true end
+
+    local state = GetFrontBusinessState(zoneId)
+    if state.is_wiped then return false end
+    if state.clean_balance < amount then return false end
+
+    state.clean_balance = state.clean_balance - amount
+    dirtyFrontBusiness[zoneId] = true
+    return true
+end
+
+function Matrix.FrontBusiness.Embezzle(zoneId, amount)
+    zoneId = tonumber(zoneId)
+    amount = tonumber(amount)
+    if not zoneId or not GetFrontBusinessConfig(zoneId) then return 0.0 end
+    if not amount or amount ~= amount or amount <= 0.0 then return 0.0 end
+
+    local state = GetFrontBusinessState(zoneId)
+    if state.is_wiped then return 0.0 end
+
+    local stolen = math_min(amount, state.clean_balance)
+    if stolen <= 0.0 then return 0.0 end
+
+    state.clean_balance = state.clean_balance - stolen
+    dirtyFrontBusiness[zoneId] = true
+    return stolen
+end
+
+
+-- =====================================================================
+-- ★★★ [FAZ 2] KATMAN 4: YAPAY ZEKA BÜRO MALİ DENETİM ANOMALİSİ ★★★
+-- TAMAMEN YENİ bir EKLEMEDİR. matrix_zone_inspectors'ın MEVCUT (server/
+-- market.lua'nın KENDİ yönettiği) zone_id/bot_id/assigned_by_citizenid/
+-- assigned_at SIGINT Inspector ataması davranışına HİÇ DOKUNULMAZ -- bu
+-- blok AYNI tabloya sql/layer7_faz5_mercenary.sql ile eklenen BAĞIMSIZ
+-- audit_score/warning_level/is_wiped kolonlarını okur/yazar.
+-- =====================================================================
+
+local dailyInvoiceCount = {}   -- [zoneId] = gunluk sahte fatura sayaci (RAM, gunluk sifirlanir)
+local dirtyAuditState   = {}   -- [zoneId] = true (matrix_zone_inspectors flush kuyrugu)
+
+
+function Matrix.FrontBusiness.LoadAuditState()
+    local ok, rows = pcall(function()
+        return MySQL.query.await('SELECT zone_id, audit_score, warning_level, is_wiped FROM matrix_zone_inspectors', {})
+    end)
+    if not ok or type(rows) ~= 'table' then
+        Matrix.Log('BUREAU', '[FAZ2][DENETIM] matrix_zone_inspectors audit kolonlari okunamadi (migration eksik olabilir) -- varsayilanlarla devam.')
+        return
+    end
+
+    for _, row in ipairs(rows) do
+        if row.zone_id and GetFrontBusinessConfig(row.zone_id) then
+            local state = GetFrontBusinessState(row.zone_id)
+            state.audit_score   = tonumber(row.audit_score) or 0.0
+            state.warning_level = tonumber(row.warning_level) or 0
+            state.is_wiped       = row.is_wiped == 1
+        end
+    end
+    Matrix.Log('BUREAU', '[FAZ2][DENETIM] Mali denetim durumu RAM onbellege yuklendi.')
+end
+
+CreateThread(function()
+    Matrix.FrontBusiness.LoadAuditState()
+end)
+
+
+local function FlushDirtyAuditState()
+    local queries = {}
+    for zoneId in pairs(dirtyAuditState) do
+        local state = frontBusinesses[zoneId]
+        if state then
+            queries[#queries + 1] = {
+                query = [[
+                    INSERT INTO matrix_zone_inspectors (zone_id, audit_score, warning_level, is_wiped)
+                    VALUES (?, ?, ?, ?)
+                    ON DUPLICATE KEY UPDATE
+                        audit_score   = VALUES(audit_score),
+                        warning_level = VALUES(warning_level),
+                        is_wiped      = VALUES(is_wiped)
+                ]],
+                values = { zoneId, state.audit_score or 0.0, state.warning_level or 0, state.is_wiped and 1 or 0 }
+            }
+        end
+        dirtyAuditState[zoneId] = nil
+    end
+    if #queries == 0 then return end
+    local ok, err = pcall(function() return MySQL.transaction.await(queries) end)
+    if not ok or err == false then
+        Matrix.Log('BUREAU', '[HATA][FAZ2][DENETIM] FlushDirtyAuditState transaction basarisiz (yutulmadi, log icin): %s', tostring(err))
+    end
+end
+
+CreateThread(function()
+    local interval = Config.Persistence.TrapHouseFlushIntervalMs or 20000
+    while true do
+        Wait(interval)
+        FlushDirtyAuditState()
+    end
+end)
+
+AddEventHandler('txAdmin:events:serverShuttingDown', function()
+    local ok, err = pcall(FlushDirtyAuditState)
+    if not ok then
+        Matrix.Log('BUREAU', '[HATA][FAZ2][DENETIM] Kapanis flush hata verdi (yutulmadi, log icin): %s', tostring(err))
+    end
+end)
+
+CreateThread(function()
+    while true do
+        Wait(24 * 60 * 60 * 1000)
+        dailyInvoiceCount = {}
+        Matrix.Log('BUREAU', '[FAZ2][DENETIM] Gunluk fatura anomalisi sayaclari sifirlandi.')
+    end
+end)
+
+
+-- Mahkeme kararıyla el koyma: paravan işletmenin TÜM mal varlığı (temiz +
+-- kirli kasa + sahiplik) KALICI olarak müsadere edilir. is_wiped=true
+-- olduktan sonra Claim/Deposit/Invoice (yukarıda, hepsi guard'lı) KALICI
+-- olarak reddedilir -- geri dönüşü YOKTUR.
+function Matrix.FrontBusiness.ExecuteWipe(zoneId)
+    local state = GetFrontBusinessState(zoneId)
+    if state.is_wiped then return false end
+
+    local seizedClean, seizedDirty = state.clean_balance, state.dirty_cash_pool
+    state.is_wiped            = true
+    state.clean_balance       = 0.0
+    state.dirty_cash_pool     = 0.0
+    state.dirty_deposited_at  = nil
+    state.owner_citizenid     = nil
+
+    dirtyFrontBusiness[zoneId] = true
+    dirtyAuditState[zoneId]    = true
+
+    TriggerEvent('matrix:internal:frontBusinessWiped', zoneId, seizedClean, seizedDirty)
+
+    Matrix.Log('BUREAU',
+        '[FAZ2][MALI WIPE] Isletme #%d (%s) paravan oldugu tespit edildi -- mahkeme karariyla el konuldu (temiz:$%.1f, kirli:$%.1f musadere edildi, sahiplik iptal).',
+        zoneId, state.business_label, seizedClean, seizedDirty)
+    return true
+end
+
+
+-- FORMÜL (RNG YOK, doygun-üssel tepki eğrisi -- bkz. shared/config.lua
+-- Config.FrontBusiness.AuditGrowthRate/NormalDailyInvoiceCount yorumu):
+--   overRatio  = max(0, (dailyCount - NormalDailyInvoiceCount) / NormalDailyInvoiceCount)
+--   auditScore = clamp(1 - exp(-AuditGrowthRate * overRatio), 0, 1)
+function Matrix.FrontBusiness.EvaluateAudit(zoneId)
+    local state = GetFrontBusinessState(zoneId)
+    if state.is_wiped then return end
+
+    local count     = dailyInvoiceCount[zoneId] or 0
+    local capacity  = math_max(Config.FrontBusiness.NormalDailyInvoiceCount, 1)
+    local overRatio = math_max((count - capacity) / capacity, 0.0)
+    local auditScore = Matrix.Clamp(1.0 - math.exp(-Config.FrontBusiness.AuditGrowthRate * overRatio), 0.0, 1.0)
+
+    state.audit_score = auditScore
+    dirtyAuditState[zoneId] = true
+
+    local newWarningLevel = 0
+    for i, threshold in ipairs(Config.FrontBusiness.AuditWarningThresholds) do
+        if auditScore >= threshold then newWarningLevel = i end
+    end
+    if newWarningLevel > state.warning_level then
+        Matrix.Log('BUREAU', '[FAZ2][DENETIM ALARMI] Isletme #%d (%s) anomali uyari seviyesi %d -> %d (skor:%.3f, gunluk fatura:%d).',
+            zoneId, state.business_label, state.warning_level, newWarningLevel, auditScore, count)
+    end
+    state.warning_level = newWarningLevel
+
+    if auditScore >= 1.0 then
+        Matrix.FrontBusiness.ExecuteWipe(zoneId)
+    end
+end
+
+
+-- server/bureau.lua Matrix.FrontBusiness.IssueFakeInvoice'in her BAŞARILI
+-- faturasında çağrılır (bkz. o fonksiyonun güncellenmiş sonu). Kalıcı bir
+-- matrix_purchase_logs kaydı bırakır + günlük sayacı besler + anomaliyi
+-- yeniden değerlendirir.
+function Matrix.FrontBusiness.RecordAuditableInvoice(zoneId, citizenid, amount)
+    MySQL.insert([[
+        INSERT INTO matrix_purchase_logs (zone_id, citizenid, amount, created_at)
+        VALUES (?, ?, ?, NOW())
+    ]], { zoneId, citizenid, amount })
+
+    dailyInvoiceCount[zoneId] = (dailyInvoiceCount[zoneId] or 0) + 1
+
+    local ok, err = pcall(Matrix.FrontBusiness.EvaluateAudit, zoneId)
+    if not ok then
+        Matrix.Log('BUREAU', '[HATA][FAZ2][DENETIM] EvaluateAudit basarisiz (yutuldu): %s', tostring(err))
+    end
+end
+
+
+RegisterCommand('isletmedenetim', function(src, args)
+    local zoneId = tonumber(args[1])
+    if not zoneId or not GetFrontBusinessConfig(zoneId) then Reply(src, 'Kullanim: /isletmedenetim [zoneId]'); return end
+    local state = GetFrontBusinessState(zoneId)
+    Reply(src, ('Isletme #%d (%s) | Gunluk-Fatura:%d | Anomali-Skoru:%.3f | Uyari-Seviyesi:%d/%d | El-Konuldu:%s'):format(
+        zoneId, state.business_label, dailyInvoiceCount[zoneId] or 0, state.audit_score,
+        state.warning_level, #Config.FrontBusiness.AuditWarningThresholds, tostring(state.is_wiped)))
+end, false)
+
+exports('GetFrontBusinessAuditState', function(zoneId)
+    local state = GetFrontBusinessState(tonumber(zoneId))
+    return { audit_score = state.audit_score, warning_level = state.warning_level, is_wiped = state.is_wiped }
+end)
+
+
+-- =====================================================================
+-- ★★★ [FAZ 2] KATMAN 3: ON-DEMAND DISPATCH TAARRUZİ SİNYAL KAYBI
+-- (FAIL-SAFE PROTOCOL) ★★★
+-- TAMAMEN YENİ bir EKLEMEDİR. server/main.lua'nın Matrix.CompleteDispatch/
+-- Matrix.Dispatches/Matrix.RadioSilence (HİÇBİRİ DEĞİŞTİRİLMEDİ) ZATEN VAR
+-- OLAN PUBLIC API'sinden başka HİÇBİR ŞEYE dokunulmaz -- main.lua'nın
+-- kendi private navmesh/entity yardımcılarına (o dosyaya özel `local`
+-- sabitler) buradan erişim YOKTUR ve gerekmez: "sahadan çekilme" zaten
+-- Matrix.CompleteDispatch(botId, 'signal_lost')'un KENDİSİDİR (ped/araç
+-- despawn edilir, bot RAM'de STABİL/BEKLEMEDE'ye döner -- dosyanın kendi
+-- "sahadan çekildi" sözleşmesi).
+-- =====================================================================
+
+-- Deterministik "en güvenli aktif trap house" (RNG YOK): şehirdeki HER
+-- aktif (raid_ordered=false) trap house'un [T4] öğrenme-çekirdeği kilit
+-- katsayısı (ComputeLockdownCoefficient, dosyanın KENDİ [T4] bloğu,
+-- DEĞİŞTİRİLMEDİ) + normalize edilmiş siber ısısı (cyberLeakHeatmap)
+-- TOPLANIR; en düşük toplam skorlu ev kazanır. Berabere kalırsa en düşük
+-- ID'li ev seçilir (kararlılık).
+function Matrix.Bureau.GetSafestActiveTrapHouse()
+    local bestId, bestScore = nil, math_huge
+    for id, house in pairs(Matrix.TrapHouses) do
+        if not house.raid_ordered then
+            local heatRatio = math_min((cyberLeakHeatmap[id] or 0.0) / math_max(Config.Bureau.CyberLeakMaxIntensity, 0.0001), 1.0)
+            local score = heatRatio + ComputeLockdownCoefficient(id)
+            if score < bestScore or (score == bestScore and (not bestId or id < bestId)) then
+                bestId, bestScore = id, score
+            end
+        end
+    end
+    return bestId, bestScore
+end
+
+
+-- ★ İKİNCİ, BAĞIMSIZ bir 'playerDropped' handler'ı (main.lua'nınki İLE
+-- BİRLİKTE çalışır -- aynı olay adına birden fazla AddEventHandler FiveM/
+-- Lua'da güvenlidir, hepsi sırayla tetiklenir; kayıt sırası fxmanifest'in
+-- server_scripts listesine göredir: main.lua ÖNCE, bu dosya SONRA yüklenir
+-- -- yani main.lua'nın kendi handler'ı ÖNCE çalışır ve dispatch.dispatcher_src
+-- alanını halihazırda `nil`lemeden ÖNCE biz de aynı `src` eşleşmesini
+-- yaparız, bu yüzden burada AYRICA `dispatch.dispatcher_src == src`
+-- eşleşmesi kullanılır -- main.lua'nın kendi mantığına DOKUNULMAZ).
+AddEventHandler('playerDropped', function()
+    local src = source
+    local affected = {}
+    for botId, dispatch in pairs(Matrix.Dispatches or {}) do
+        if dispatch.dispatcher_src == src then
+            affected[#affected + 1] = botId
+        end
+    end
+    if #affected == 0 then return end
+
+    local safeHouseId = Matrix.Bureau.GetSafestActiveTrapHouse()
+
+    for _, botId in ipairs(affected) do
+        local bot = Matrix.Bots and Matrix.Bots[botId]
+        local ok = pcall(Matrix.CompleteDispatch, botId, 'signal_lost')
+        if ok and bot then
+            if safeHouseId then
+                bot.state.trap_house_id = safeHouseId
+            end
+            -- ★ FROZEN STATE: RAM-only, DB'ye yazılmaz (hafif/gecici bir
+            -- bayrak) -- server/kitchen.lua Matrix.Kitchen.
+            -- ProcessMercenaryEconomy bu botu maas/zimmet dongusunden
+            -- MUAF tutar, dispatch sistemleri yeni gorev ATAMAZ (Co-Op
+            -- Mutex zaten CompleteDispatch ile serbest ama bot "sahaya
+            -- cikmis" sayilmaz).
+            bot.frozen_state  = true
+            bot.frozen_reason = 'signal_lost'
+            bot.frozen_at     = Matrix.Now()
+        end
+    end
+
+    Matrix.Log('BUREAU',
+        '[FAZ2][FAIL-SAFE] src=%d baglanti koptu -- %d bot operasyonu ANINDA iptal etti, guvenli sigInak: Trap #%s, tum bunlar Frozen State moduna gecti.',
+        src, #affected, tostring(safeHouseId))
+end)
+
+
+-- ★ TEKELLEŞMİŞ/TEK-HİYERARŞİ MİMARİ NOTU (bkz. dosya başı Katman 1
+-- BureaucraticVelocity yorumu, AYNI gerekçe): bu proje bot<->citizenid
+-- kalıcı sahiplik ilişkisi TUTMAZ (Matrix.Dispatches yalnızca GEÇİCİ bir
+-- dispatcher_src taşır, bağlantı koptuğunda main.lua'nın KENDİ handler'ı
+-- bunu zaten `nil`ler). Bu yüzden "hangi oyuncu geri bağlandığında hangi
+-- botu çöz" eşlemesi YAPILAMAZ/İCAT EDİLMEZ -- tek bir oyuncu hiyerarşisi
+-- (Config.Hierarchy) etrafında kurulu bu projede HERHANGİ bir üyenin
+-- yeniden bağlanması, TÜM Frozen State botları serbest bırakır (aynı
+-- organizasyonun operasyonel devamlılığı geri döndü).
+AddEventHandler('qbx_core:server:onPlayerLoaded', function()
+    local unfrozen = 0
+    for _, bot in pairs(Matrix.Bots or {}) do
+        if bot.frozen_state then
+            bot.frozen_state  = false
+            bot.frozen_reason = nil
+            bot.frozen_at     = nil
+            unfrozen = unfrozen + 1
+        end
+    end
+    if unfrozen > 0 then
+        Matrix.Log('BUREAU', '[FAZ2][FAIL-SAFE] Oyuncu baglantisi geri geldi -- %d bot Frozen State modundan cikti.', unfrozen)
+    end
+end)
+
+
+RegisterCommand('guvenlisiginak', function(src)
+    local id, score = Matrix.Bureau.GetSafestActiveTrapHouse()
+    if not id then Reply(src, 'Aktif (baskina ugramamis) hicbir trap house yok.'); return end
+    local house = Matrix.TrapHouses[id]
+    Reply(src, ('En guvenli aktif trap house: #%d (%s) | skor:%.4f (dusuk=iyi)'):format(id, house and house.label or '?', score))
+end, false)
+
+exports('GetSafestActiveTrapHouse', function() return Matrix.Bureau.GetSafestActiveTrapHouse() end)

@@ -209,6 +209,42 @@ AddCheck('kanca mevcut: Matrix.FrontBusiness.IssueFakeInvoice', function()
     return type(Matrix.FrontBusiness) == 'table' and type(Matrix.FrontBusiness.IssueFakeInvoice) == 'function', 'kanca'
 end)
 
+-- ★ [FAZ 2] KATMAN 1-4 regresyon korumaları
+AddCheck('Config.Mercenary tanimlari gecerli', function()
+    local m = Config.Mercenary
+    if not m or type(m.BaseWagePerHour) ~= 'number' or m.BaseWagePerHour <= 0 then return false, 'BaseWagePerHour gecersiz' end
+    if type(m.WarningCauses) ~= 'table' or #m.WarningCauses == 0 then return false, 'WarningCauses bos' end
+    if type(m.WarningMethods) ~= 'table' or #m.WarningMethods == 0 then return false, 'WarningMethods bos' end
+    for _, method in ipairs(m.WarningMethods) do
+        if type(m.WarningMethodSeverity[method]) ~= 'number' then
+            return false, ('WarningMethodSeverity["%s"] eksik'):format(tostring(method))
+        end
+    end
+    return true, ('%d sebep, %d yontem'):format(#m.WarningCauses, #m.WarningMethods)
+end)
+
+AddCheck('kanca mevcut: Matrix.Kitchen.ProcessMercenaryEconomy', function()
+    return type(Matrix.Kitchen) == 'table' and type(Matrix.Kitchen.ProcessMercenaryEconomy) == 'function', 'kanca'
+end)
+AddCheck('kanca mevcut: Matrix.Kitchen.WarnAgent', function()
+    return type(Matrix.Kitchen) == 'table' and type(Matrix.Kitchen.WarnAgent) == 'function', 'kanca'
+end)
+AddCheck('kanca mevcut: Matrix.Bureau.GetSafestActiveTrapHouse', function()
+    return type(Matrix.Bureau) == 'table' and type(Matrix.Bureau.GetSafestActiveTrapHouse) == 'function', 'kanca'
+end)
+AddCheck('kanca mevcut: Matrix.DistrictHubs.TriggerDispatch', function()
+    return type(Matrix.DistrictHubs) == 'table' and type(Matrix.DistrictHubs.TriggerDispatch) == 'function', 'kanca'
+end)
+AddCheck('kanca mevcut: Matrix.FrontBusiness.EvaluateAudit', function()
+    return type(Matrix.FrontBusiness) == 'table' and type(Matrix.FrontBusiness.EvaluateAudit) == 'function', 'kanca'
+end)
+AddCheck('Bureau.GetEffectiveSnitchThreshold botId olmadan geriye donuk uyumlu', function()
+    if type(Matrix.Bureau.GetEffectiveSnitchThreshold) ~= 'function' then return false, 'kanca yok' end
+    local ok, threshold = pcall(Matrix.Bureau.GetEffectiveSnitchThreshold)
+    if not ok or type(threshold) ~= 'number' then return false, 'botId olmadan cagri hata verdi' end
+    return threshold >= Config.Kitchen.SnitchThreshold, ('esik=%.3f'):format(threshold)
+end)
+
 -- Matrix.Clamp SIFIR RNG'nin en temel taşı -- iki ayrı çağrının BYTE-BYTE
 -- aynı sonucu verdiğini kanıtlamak, "deterministik DNA"nın kendisini
 -- test eder (formülleri değil, o formüllerin ÜZERİNE oturduğu primitifi).
@@ -289,7 +325,14 @@ local DbChecks = {
     { 'matrix_district_hubs tablosu mevcut', function() return TableExists('matrix_district_hubs'), 'sql/layer7_faz1.sql' end },
     { 'matrix_zone_ledger.dirty_cash_pool kolonu mevcut (FAZ2 migration)', function()
         return ColumnExists('matrix_zone_ledger', 'dirty_cash_pool'), 'sql/layer7_faz4_front_business.sql calistirildi mi?'
-    end }
+    end },
+    { 'matrix_bots.accounting_precision kolonu mevcut (FAZ2 migration)', function()
+        return ColumnExists('matrix_bots', 'accounting_precision'), 'sql/layer7_faz5_mercenary.sql calistirildi mi?'
+    end },
+    { 'matrix_zone_inspectors.is_wiped kolonu mevcut (FAZ2 migration)', function()
+        return ColumnExists('matrix_zone_inspectors', 'is_wiped'), 'sql/layer7_faz5_mercenary.sql calistirildi mi?'
+    end },
+    { 'matrix_purchase_logs tablosu mevcut', function() return TableExists('matrix_purchase_logs'), 'sql/layer7_faz5_mercenary.sql' end }
 }
 
 -- ---------------------------------------------------------------------

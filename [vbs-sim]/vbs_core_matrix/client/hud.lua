@@ -839,6 +839,33 @@ local function OpenBotTrunkOpsDialog(botId)
 end
 
 
+-- ★ [FAZ 2] KATMAN 2: AJAN UYAR -- SEBEP/YONTEM PROTOKOLU. Sebep/Yontem
+-- KATI bir beyaz listeden (Config.Mercenary.WarningCauses/WarningMethods)
+-- 'select' tipiyle (OpenAssignInspectorDialog'daki BOLGE secimi İLE AYNI
+-- desen) secilir -- serbest metin girisi YOK. Boslukli string'ler tasidigi
+-- icin (Sebep/Yontem etiketleri) [S1] ExecuteCommand'a DEGIL, structured
+-- bir TriggerServerEvent'e gider (OpenGiveItemToBotDialog İLE AYNI mimari).
+local function OpenWarnAgentDialog(botId)
+    local causeOptions = {}
+    for _, c in ipairs(Config.Mercenary and Config.Mercenary.WarningCauses or {}) do
+        causeOptions[#causeOptions + 1] = { value = c, label = c }
+    end
+    local methodOptions = {}
+    for _, m in ipairs(Config.Mercenary and Config.Mercenary.WarningMethods or {}) do
+        methodOptions[#methodOptions + 1] = { value = m, label = m }
+    end
+
+    local input = lib.inputDialog(('Ajan Uyar - Bot #%d'):format(botId), {
+        { type = 'select', label = 'Sebep (Cause)', required = true, options = causeOptions },
+        { type = 'select', label = 'Yontem (Method)', required = true, options = methodOptions }
+    })
+    if not input or not input[1] or not input[2] then return end
+
+    NotifyActionSent(('Bot #%d uyariliyor: Sebep: %s - Yontem: %s'):format(botId, input[1], input[2]))
+    TriggerServerEvent('matrix:server:kitchen:warnAgent', botId, input[1], input[2])
+end
+
+
 local function OpenBotActionsMenu(botId, roleLabel)
     local options = {
         {
@@ -879,6 +906,18 @@ local function OpenBotActionsMenu(botId, roleLabel)
             description = 'Bota kalici atanmis aracin bagajina, trap house deposundan miktar aktar.',
             icon        = 'truck-ramp-box',
             onSelect    = function() OpenBotTrunkOpsDialog(botId) end
+        },
+        {
+            -- ★ [FAZ 2] KATMAN 2: Ajan Uyar -- Sebep/Yontem protokolu.
+            -- Server tarafi (server/kitchen.lua Matrix.Kitchen.WarnAgent)
+            -- tum dogrulamayi/etkiyi yapar; bu YALNIZCA ox_lib'in mevcut
+            -- inputDialog bilesenini kullanan bir tetikleyicidir -- yeni
+            -- bir HUD/NUI paneli URETILMEZ.
+            title       = 'Ajan Uyar',
+            description = 'Bagimli/zimmetci bota Sebep-Yontem formatinda resmi ihtar ver (hirsizlik egilimini keser, disiplini artirir; ancak dopamin dususu snitch esigini hassaslastirir).',
+            icon        = 'triangle-exclamation',
+            iconColor   = '#ffaa00',
+            onSelect    = function() OpenWarnAgentDialog(botId) end
         }
     }
 
@@ -1417,6 +1456,27 @@ local function OpenHubStatusReport()
 end
 
 
+-- ★ [FAZ 2] KATMAN 3: LOJİSTİK SEVK EMRİ VER (TEK SEFERLİK). Sayisal Hub ID
+-- disinda serbest metin YOK -- OpenHubAssignDialog İLE AYNI SanitizeNumericArg
+-- disiplini, ExecuteCommand'a guvenle gider.
+local function OpenHubDispatchDialog()
+    local input = lib.inputDialog('Lojistik Sevk Emri Ver (Tek Seferlik)', {
+        {
+            type = 'number', label = 'Hub ID',
+            description = 'Otomatik donguyu BEKLEMEDEN, bu hub icin SIMDI tek seferlik bir sevk calistirir.',
+            required = true, min = 1, max = 2147483646
+        }
+    })
+    if not input then return end
+
+    local hubId = SanitizeNumericArg(input[1], 1, 2147483646)
+    if not hubId then NotifyInvalidInput('Hub ID gecersiz.'); return end
+
+    NotifyActionSent(('Hub #%d icin tek seferlik lojistik sevk emri gonderiliyor...'):format(hubId))
+    ExecuteCommand(('lojistiksevket %d'):format(hubId))
+end
+
+
 local function OpenDistrictHubsMenu()
     lib.registerContext({
         id    = 'matrix_district_hubs_menu',
@@ -1428,6 +1488,15 @@ local function OpenDistrictHubsMenu()
                 description = 'Bu trap house icin, su anda bulundugunuz konuma bir Toplu Satis Hub kaydeder.',
                 icon        = 'location-dot',
                 onSelect    = OpenHubAssignDialog
+            },
+            {
+                -- ★ [FAZ 2] KATMAN 3: on-demand tek seferlik sevk -- MEVCUT
+                -- otomatik donguye (Config.DistrictHubs.DemandCycleSeconds)
+                -- DOKUNMAZ, EK bir tetikleyicidir.
+                title       = 'Lojistik Sevk Emri Ver (Tek Seferlik)',
+                description = 'Secilen Hub icin deposundan HEMEN tek seferlik bir toplu satis dongusu calistirir.',
+                icon        = 'truck-fast',
+                onSelect    = OpenHubDispatchDialog
             },
             {
                 title       = 'Hub Durumu Raporu',

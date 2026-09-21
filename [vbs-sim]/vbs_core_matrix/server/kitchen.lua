@@ -131,6 +131,14 @@ function Matrix.Kitchen.ProcessMinuteCycle(bot)
     -- MEVCUT per-bot dakika dongusune eklenir, ayri bir tick/thread ICAT
     -- EDILMEZ (0 Resmon butcesi korunur).
     Matrix.Kitchen.ProcessTrustWithdrawalTheft(bot)
+
+    -- ★ [FAZ 2][KATMAN 1] Parali Asker Ekonomisi (Maas/Zimmet) -- bkz.
+    -- dosya sonundaki blok. AYNI disiplin: MEVCUT per-bot dakika dongusune
+    -- eklenir, ayri bir tick/thread ICAT EDILMEZ.
+    local ok, err = pcall(Matrix.Kitchen.ProcessMercenaryEconomy, bot)
+    if not ok then
+        Matrix.Log('KITCHEN', '[HATA][FAZ2] ProcessMercenaryEconomy basarisiz (yutuldu): %s', tostring(err))
+    end
 end
 
 
@@ -452,6 +460,28 @@ function Matrix.Kitchen.OnCaptured(botId, trapHouseId)
     if not bot then return nil end
 
 
+    -- ★ [FAZ 2][KATMAN 1] GREV MODU: maaşı ödenemeyen bot yakalandığında
+    -- ARTIK hiçbir sadakat/panik hesabı yapmadan hücre bilgilerini DOĞRUDAN
+    -- Büro'ya satar (talep: "yakalandığında hücre bilgilerini direkt
+    -- Büro'ya satmalıdır"). OPSEC-4 bilgi-kısıtlama (knowledge-mask) BİLİNÇLİ
+    -- olarak ATLANIR -- grev, sadakatin TAMAMEN çökmesidir, kısmi sızıntı
+    -- mantığı burada geçersizdir.
+    if bot.on_strike then
+        MySQL.query.await([[
+            INSERT INTO matrix_snitch_events (bot_id, trap_house_id, snitch_index, lied, created_at)
+            VALUES (?, ?, 1.0, 0, NOW())
+        ]], { botId, trapHouseId })
+
+        Matrix.Bureau.ReceiveSnitchLeak(trapHouseId)
+
+        Matrix.Log('KITCHEN',
+            '[FAZ2][GREV IHANETI] Bot #%d (odenmemis maas -- grev modu) yakalandi ve trap #%d bilgilerini DOGRUDAN Buroya satti.',
+            botId, trapHouseId)
+
+        return 1.0, true
+    end
+
+
     local snitchIndex = Matrix.Clamp(Matrix.Kitchen.ComputeSnitchIndex(bot), -1.0, 1.0)
 
 
@@ -460,7 +490,10 @@ function Matrix.Kitchen.OnCaptured(botId, trapHouseId)
     -- efektif eşik kullanılır (bkz. server/bureau.lua
     -- GetEffectiveSnitchThreshold). Hook yoksa davranış BİREBİR ESKİSİ
     -- GİBİDİR (taban eşiğe düşer).
-    local effectiveThreshold = (Matrix.Bureau and Matrix.Bureau.GetEffectiveSnitchThreshold and Matrix.Bureau.GetEffectiveSnitchThreshold())
+    -- ★ [FAZ 2][KATMAN 2] botId ARTIK iletiliyor -- server/kitchen.lua
+    -- Matrix.Kitchen.WarnAgent'ın per-bot warning_snitch_sensitivity'sini
+    -- de (opsiyonel, geriye dönük uyumlu parametre) hesaba katar.
+    local effectiveThreshold = (Matrix.Bureau and Matrix.Bureau.GetEffectiveSnitchThreshold and Matrix.Bureau.GetEffectiveSnitchThreshold(botId))
         or Config.Kitchen.SnitchThreshold
     local didSnitch = snitchIndex >= effectiveThreshold
 
@@ -986,3 +1019,211 @@ end, false)
 
 exports('FlushKatmanKnowledge', function(botId) return Matrix.Kitchen.FlushKatmanKnowledge(botId) end)
 exports('GetKnowledgeMask', function(botId) return Matrix.Kitchen.GetKnowledgeMask(botId) end)
+
+
+-- =====================================================================
+-- ★★★ [FAZ 2] KATMAN 1: PARALI ASKER EKONOMISI (AJAN MAASLARI, ZIMMET) ★★★
+-- TAMAMEN YENİ bir EKLEMEDİR. ProcessCook/ProcessMinuteCycle/
+-- ProcessTrustWithdrawalTheft'in (yukarıda) HİÇBİR formülüne dokunulmadı --
+-- tek istisna, ProcessMinuteCycle'ın SONUNA eklenen tek satırlık bir çağrı
+-- (bkz. o fonksiyonun güncellenmiş sonu). Bu KESİNLİKLE
+-- ProcessTrustWithdrawalTheft (matrix_trap_stash deposundan çalma, çete-
+-- geneli güvene bağlı) İLE AYNI MEKANİZMA DEĞİLDİR -- bu blok server/
+-- bureau.lua Matrix.FrontBusiness'ın PARAVAN İŞLETME KASASINDAN (clean_
+-- balance) çalar, tetikleyicisi botun KENDİ sadakati/bağımlılığıdır.
+--
+-- Trap house <-> paravan işletme (zone) eşlemesi, server/market.lua
+-- Matrix.Inspector.GetZoneForTrapHouse (ZATEN VAR, DEĞİŞTİRİLMEDİ,
+-- FindNearestZone'un coğrafi eşlemesini yeniden kullanır) ile kurulur --
+-- ikinci bir "trap house -> zone" tablosu İCAT EDİLMEZ.
+-- SIFIR RNG: her karar bir eşik/oran hesabıdır.
+-- =====================================================================
+
+--- Bir trap house'un "Lojistik Müdürü" botu: o trap house'a atanmış
+--- 'runner' rolündeki en düşük ID'li bot (deterministik, kararlı seçim --
+--- yeni bir hiyerarşi/rütbe alanı İCAT EDİLMEZ, MEVCUT bot.role='runner'
+--- semantiği -- "Lojistik rütbesindeki kurye", zaten server/logistics.lua
+--- Matrix.Logistics.DispatchAmmoRun'da AYNI şekilde kullanılıyor --
+--- YENİDEN kullanılır). Bulunamazsa nil döner (Kayıp Raporu kimseye
+--- yazılmaz, yalnızca loglanır).
+function Matrix.Kitchen.GetLogisticsManagerBot(trapHouseId)
+    local best = nil
+    for id, b in pairs(Matrix.Bots) do
+        if b.state.trap_house_id == trapHouseId and b.role == 'runner' then
+            if not best or id < best.id then best = b end
+        end
+    end
+    return best
+end
+
+
+-- FORMÜL SETİ (her GERÇEK dakikada bir, ProcessMinuteCycle'dan çağrılır):
+--
+--   1) MAAŞ: wagePerMinute = (Config.Mercenary.BaseWagePerHour *
+--      Config.Kitchen.WorkFactor[bot.state.activity]) / 60 -- WorkFactor
+--      (ZATEN VAR, ikinci bir efor tablosu İCAT EDİLMEZ) idle iken 0'dır,
+--      yani bekleyen bot ücretsizdir. Ödeme paravan işletmenin clean_
+--      balance kasasından (server/bureau.lua Matrix.FrontBusiness.PayWage)
+--      düşülür; kasa yetersizse bot.on_strike=true (GREV MODU) olur --
+--      server/kitchen.lua Matrix.Kitchen.OnCaptured bunu okuyup DOĞRUDAN
+--      sızıntı tetikler.
+--
+--   2) ZİMMET: sadakati (psychology.loyalty_base) tavanın ALTINDA VEYA
+--      bağımlılığı (biology.addiction_level) > 0 olan bot, KENDİ
+--      accounting_precision becerisiyle orantılı bir miktarı kasadan
+--      (Matrix.FrontBusiness.Embezzle) çeker:
+--        stealAmount = EmbezzleBaseAmountPerMinute * (1-loyalty)
+--                      * (1 + addiction/100) * accounting_precision
+--      Çalınan miktar, o trap house'un Lojistik Müdürü botunun
+--      loss_report_total'ına (Kayıp Raporu) yazılır -- talep: "sorumluluk
+--      hiyerarşik olarak doğrudan atanan Lojistik Müdürü botunun hanesine
+--      yazılmalı".
+--
+--   FROZEN STATE MUAFİYETİ: server/bureau.lua'nın Fail-Safe protokolü
+--   (Sinyal Kaybı) ile işaretlenen botlar (bot.frozen_state) bu döngüden
+--   TAMAMEN muaftır -- "sahada olmayan" bir bota maaş/zimmet hesaplamak
+--   anlamsızdır.
+function Matrix.Kitchen.ProcessMercenaryEconomy(bot)
+    if bot.frozen_state then return end
+    if not bot.state.trap_house_id then return end
+
+    local zoneId = Matrix.Inspector and Matrix.Inspector.GetZoneForTrapHouse
+        and Matrix.Inspector.GetZoneForTrapHouse(bot.state.trap_house_id)
+    if not zoneId then return end
+    if not Matrix.FrontBusiness then return end
+
+    -- 1) MAAŞ
+    local workFactor = Config.Kitchen.WorkFactor[bot.state.activity] or 0.0
+    local wagePerMinute = (Config.Mercenary.BaseWagePerHour * workFactor) / 60.0
+
+    if wagePerMinute > 0.0 and Matrix.FrontBusiness.PayWage then
+        local paid = Matrix.FrontBusiness.PayWage(zoneId, wagePerMinute)
+        if bot.on_strike ~= (not paid) then
+            bot.on_strike = not paid
+            Matrix.MarkBotDirty(bot.id)
+        end
+        if not paid then
+            Matrix.Log('KITCHEN', '[FAZ2][GREV] Bot #%d maasi odenemedi (Isletme #%d kasasi yetersiz veya el konulmus) -- GREV MODU.',
+                bot.id, zoneId)
+        end
+    end
+
+    -- 2) ZİMMET
+    local loyalty         = bot.psychology.loyalty_base or 0.5
+    local addiction        = bot.biology.addiction_level or 0.0
+    local cooldownActive   = bot.warning_theft_cooldown_until and Matrix.Now() < bot.warning_theft_cooldown_until
+    local eligible          = (loyalty < Config.Mercenary.EmbezzlementLoyaltyCeiling) or (addiction > 0.0)
+
+    if eligible and not cooldownActive and Matrix.FrontBusiness.Embezzle then
+        local precision   = bot.psychology.accounting_precision or 0.5
+        local stealAmount = Config.Mercenary.EmbezzleBaseAmountPerMinute
+            * (1.0 - loyalty)
+            * (1.0 + (addiction / 100.0))
+            * precision
+
+        if stealAmount > 0.0 then
+            local stolen = Matrix.FrontBusiness.Embezzle(zoneId, stealAmount)
+            if stolen and stolen > 0.0 then
+                local manager = Matrix.Kitchen.GetLogisticsManagerBot(bot.state.trap_house_id)
+                if manager then
+                    manager.loss_report_total = (manager.loss_report_total or 0.0) + stolen
+                    Matrix.MarkBotDirty(manager.id)
+                end
+                Matrix.Log('KITCHEN',
+                    '[FAZ2][ZIMMET] Bot #%d Isletme #%d kasasindan $%.1f zimmetine gecirdi (Kayip Raporu -> Lojistik Muduru Bot #%s).',
+                    bot.id, zoneId, stolen, manager and tostring(manager.id) or 'ATANMAMIS')
+            end
+        end
+    end
+end
+
+
+RegisterCommand('zimmetdurum', function(src, args)
+    local botId = tonumber(args[1])
+    local bot = botId and Matrix.Bots[botId]
+    if not bot then Reply(src, 'Kullanim: /zimmetdurum [botId]'); return end
+
+    Reply(src, ('Bot #%d | Sadakat:%.3f | Bagimlilik:%.1f | Muhasebe-Hassasiyeti:%.3f | Grevde:%s | Kayip-Raporu:$%.1f'):format(
+        botId, bot.psychology.loyalty_base or 0.5, bot.biology.addiction_level or 0.0,
+        bot.psychology.accounting_precision or 0.5, tostring(bot.on_strike or false), bot.loss_report_total or 0.0))
+end, false)
+
+exports('GetLogisticsManagerBot', function(trapHouseId) return Matrix.Kitchen.GetLogisticsManagerBot(trapHouseId) end)
+
+
+-- =====================================================================
+-- ★★★ [FAZ 2] KATMAN 2: F10 "AJAN UYAR" -- SEBEP/YÖNTEM PROTOKOLÜ ★★★
+-- TAMAMEN YENİ bir EKLEMEDİR. client/hud.lua'nın F10 -> Canlı Kadro -> Bot
+-- İşlemleri menüsüne eklenen "Ajan Uyar" seçeneği (client tarafında YENİ
+-- bir HUD/NUI paneli ÜRETİLMEDİ -- yalnızca ox_lib inputDialog/context
+-- tetikleyicileri bağlandı) bu event'i tetikler.
+--
+-- Sebep/Yöntem KATI bir beyaz listeden (Config.Mercenary.WarningCauses/
+-- WarningMethods) seçilir -- serbest metin KABUL EDİLMEZ.
+--
+-- ETKİLER (RNG YOK, hepsi Yöntem'in severity çarpanıyla ölçeklenir):
+--   - warning_theft_cooldown_until: ProcessMercenaryEconomy'nin zimmet
+--     tetikleyicisini bu süre boyunca TAMAMEN silahsızlandırır (talep:
+--     "hırsızlık eğilimini bıçak gibi kesmeli").
+--   - psychology.resilience (ZATEN VAR olan direnç/disiplin alanı, YENİ
+--     bir "bot-level fear" alanı İCAT EDİLMEZ) yükselir (talep: "botun
+--     FearCoefficient katsayısını anlık yükseltmeli" -- bu bot-modelinde
+--     korku/disiplinin karşılığı resilience'dır).
+--   - warning_snitch_sensitivity: server/bureau.lua'nın GetEffectiveSnitch
+--     Threshold(botId) OPSİYONEL parametresi üzerinden efektif snitch
+--     eşiğini DÜŞÜRÜR (talep: "dopamini düşeceği için SnitchThreshold
+--     kırılma direncini hassaslaştırmalı").
+-- =====================================================================
+function Matrix.Kitchen.WarnAgent(src, botId, cause, method)
+    botId = tonumber(botId)
+    local bot = botId and Matrix.Bots[botId]
+    if not bot then return false, 'bot_missing' end
+
+    if not KitchenHasCommandAuthority(src) then return false, 'no_authority' end
+
+    local causeValid, methodValid = false, false
+    for _, c in ipairs(Config.Mercenary.WarningCauses) do if c == cause then causeValid = true break end end
+    for _, m in ipairs(Config.Mercenary.WarningMethods) do if m == method then methodValid = true break end end
+    if not causeValid or not methodValid then return false, 'bad_cause_or_method' end
+
+    local severity = Config.Mercenary.WarningMethodSeverity[method] or 1.0
+
+    bot.warning_theft_cooldown_until = Matrix.Now() + (Config.Mercenary.WarnTheftCooldownRealMinutes * 60.0 * severity)
+
+    bot.psychology.resilience = Matrix.Clamp(
+        bot.psychology.resilience + (Config.Mercenary.WarnResilienceBonus * severity), 0.0, 1.0)
+
+    bot.warning_snitch_sensitivity = Matrix.Clamp(
+        (bot.warning_snitch_sensitivity or 0.0) + (Config.Mercenary.WarnSnitchSensitivityBonus * severity), 0.0, 0.5)
+
+    Matrix.MarkBotDirty(botId)
+
+    Matrix.Log('KITCHEN',
+        '[FAZ2][AJAN UYARILDI] Bot #%d | Sebep: %s - Yontem: %s | Direnc:%.3f Zimmet-Sogumasi:%ds Snitch-Hassasiyeti:+%.3f',
+        botId, cause, method, bot.psychology.resilience,
+        math.floor(Config.Mercenary.WarnTheftCooldownRealMinutes * 60.0 * severity), bot.warning_snitch_sensitivity)
+
+    return true, { cause = cause, method = method, resilience = bot.psychology.resilience, severity = severity }
+end
+
+RegisterNetEvent('matrix:server:kitchen:warnAgent', function(botId, cause, method)
+    local src = source
+    if type(src) ~= 'number' or src <= 0 then return end
+    if type(cause) ~= 'string' or type(method) ~= 'string' then return end
+
+    local ok, resultOrReason = Matrix.Kitchen.WarnAgent(src, botId, cause, method)
+    local msg
+    if ok then
+        msg = ('[AJAN UYARILDI] Bot #%s | Sebep: %s - Yontem: %s'):format(tostring(botId), cause, method)
+    else
+        local reasons = {
+            bot_missing         = 'Bot bulunamadi.',
+            no_authority        = 'Bu islem icin yeterli rutbeniz yok.',
+            bad_cause_or_method = 'Gecersiz Sebep veya Yontem secimi.'
+        }
+        msg = ('Uyari basarisiz: %s'):format(reasons[resultOrReason] or tostring(resultOrReason))
+    end
+    TriggerClientEvent('matrix:client:actionNotify', src, ok, msg)
+end)
+
+exports('WarnAgent', function(src, botId, cause, method) return Matrix.Kitchen.WarnAgent(src, botId, cause, method) end)

@@ -1081,7 +1081,84 @@ Config.FrontBusiness = {
     -- pahalıya (yüksek komisyonla) temizlenir.
     BaseCommissionRate     = 0.12,
     TraceCommissionPenalty = 0.20,
-    MaxCommissionRate      = 0.45
+    MaxCommissionRate      = 0.45,
+
+    -- ---------------------------------------------------------------------
+    -- KATMAN 4: YAPAY ZEKA BÜRO MALİ DENETİM ANOMALİSİ (AUDIT WIPE)
+    -- server/bureau.lua Matrix.FrontBusiness.EvaluateAudit bu sabitleri okur.
+    -- ---------------------------------------------------------------------
+
+    -- Bir işletmenin "şüphe çekmeden" günde kesebileceği normal sahte fatura
+    -- sayısı. Bunun ÜSTÜNE çıkan HER fatura anomali skorunu üssel besler.
+    NormalDailyInvoiceCount = 20,
+
+    -- Doygun-üssel tepki eğrisinin büyüme oranı: auditScore = 1-exp(-rate*overRatio).
+    -- rate=0.15 iken overRatio=24 (örn. günde 500 fatura, 20 normalin 24 katı
+    -- fazlası) auditScore'u ~%97'ye taşır -- talep örneğiyle (günde 500 fatura
+    -- -> neredeyse kesin Mali Wipe) BİREBİR TUTARLI.
+    AuditGrowthRate = 0.15,
+
+    -- auditScore bu eşikleri (sırayla) GEÇTİKÇE warning_level 1/2/3'e yükselir.
+    -- 3. eşiğin (0.90) ÜSTÜNDE, auditScore 1.0'a ulaştığı AN Mali Wipe tetiklenir.
+    AuditWarningThresholds = { 0.34, 0.67, 0.90 }
+}
+
+-- =====================================================================
+-- KATMAN 1: AJAN MAAŞLARI, ZİMMET VE KASADAN PARA ÇALMA (MERCENARY ECONOMY)
+-- server/kitchen.lua Matrix.Kitchen.ProcessMercenaryEconomy/WarnAgent bu
+-- sabitleri okur. Config.Kitchen.WorkFactor (DEĞİŞTİRİLMEDİ) efor ağırlığı
+-- olarak YENİDEN KULLANILIR -- ikinci bir efor tablosu İCAT EDİLMEZ.
+-- =====================================================================
+Config.Mercenary = {
+    -- Config.Kitchen.WorkFactor=1.0 (teorik tavan) iken saatlik yasal ücret.
+    -- Gerçek ücret = BaseWagePerHour * WorkFactor[bot.state.activity].
+    BaseWagePerHour = 6000.0,
+
+    -- Sadakat bu tavanın ALTINDAYSA zimmet mekanizması silahlanır (bkz.
+    -- Config.Kitchen.TrustWithdrawalTheftTrustCeiling İLE AYNI ruh, ama
+    -- BAĞIMSIZ bir tetikleyici -- bu, çete-geneli güven DEĞİL, botun KENDİ
+    -- sadakatidir).
+    EmbezzlementLoyaltyCeiling = 0.35,
+
+    -- addiction=0, loyalty=1, accounting_precision=1 iken zimmet TEORİK
+    -- olarak sıfırdır (loyalty>=ceiling ise mekanizma zaten silahsız); tavan
+    -- durumda (loyalty=0, addiction=100, precision=1.0) dakikada çekilen
+    -- MAKSİMUM tutar budur (formül: bkz. ProcessMercenaryEconomy yorumu).
+    EmbezzleBaseAmountPerMinute = 15.0,
+
+    -- [Ajan Uyar] F10 protokolünün katı Sebep/Yöntem beyaz listesi (serbest
+    -- metin YOK -- sunucu bu listelerin dışındaki her girdiyi reddeder).
+    WarningCauses = {
+        'Madde Bağımlılığı ve Hırsızlık',
+        'Sadakatsizlik',
+        'Performans Yetersizliği'
+    },
+    WarningMethods = {
+        'Sözlü İhtar',
+        'Kasa Erişiminin Kısıtlanması',
+        'Rütbe Tenzili ve Maaş Kesintisi'
+    },
+    -- Yöntemin şiddeti: aşağıdaki üç etkinin (soğuma süresi/direnç bonusu/
+    -- snitch hassasiyeti) hepsini AYNI çarpanla ölçekler -- üç ayrı sabit
+    -- tablosu İCAT EDİLMEZ.
+    WarningMethodSeverity = {
+        ['Sözlü İhtar']                       = 0.5,
+        ['Kasa Erişiminin Kısıtlanması']      = 0.8,
+        ['Rütbe Tenzili ve Maaş Kesintisi']   = 1.0
+    },
+
+    -- Uyarı sonrası zimmet mekanizmasının TAMAMEN silahsız kaldığı süre
+    -- (gerçek dakika, severity ile çarpılır: bkz. Matrix.Kitchen.WarnAgent).
+    WarnTheftCooldownRealMinutes = 180.0,
+
+    -- Uyarı, botun psychology.resilience'ını (ZATEN VAR olan direnç/disiplin
+    -- alanı, YENİ bir "bot-level fear" alanı İCAT EDİLMEZ) bu kadar yükseltir.
+    WarnResilienceBonus = 0.15,
+
+    -- Uyarı, botun EFEKTİF snitch eşiğini (bkz. server/bureau.lua
+    -- GetEffectiveSnitchThreshold'un opsiyonel botId parametresi) bu kadar
+    -- DÜŞÜRÜR -- dopamin düşüşü, kırılma direncini hassaslaştırır.
+    WarnSnitchSensitivityBonus = 0.08
 }
 
 return Config
