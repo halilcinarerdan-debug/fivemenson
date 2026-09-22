@@ -262,31 +262,63 @@ local function MarkFleetDirty(plate)
 end
 
 
+-- ★ CRITICAL FIX: eski "fire-and-forget MySQL.prepare + donus beklenmeden
+-- RAM bayragini temizleme" deseni terk edildi. Simdi TUM plakalar TEK bir
+-- toplu MySQL.transaction.await icinde kilitlenir; RAM'daki dirtyFleet
+-- bayraklari SADECE VE SADECE transaction basariyla (true) bittiginde
+-- temizlenir -- basarisiz olursa bayraklar KORUNUR ve bir sonraki flush
+-- turunda tekrar denenir (veri kaybi YOK).
 local function FlushDirtyFleet()
+    local pendingPlates = {}
     for plate in pairs(dirtyFleet) do
+        pendingPlates[#pendingPlates + 1] = plate
+    end
+    if #pendingPlates == 0 then return end
+
+
+    local queries = {}
+    for _, plate in ipairs(pendingPlates) do
         local v = FleetVehicles[plate]
         if v then
-            MySQL.prepare([[
-                INSERT INTO matrix_fleet
-                    (plate, vehicle_class, vin_status, vehicle_wear, registered_by_citizenid,
-                     assigned_bot_id, assignment_mode, verified_stolen_plate, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
-                ON DUPLICATE KEY UPDATE
-                    vehicle_class           = VALUES(vehicle_class),
-                    vin_status              = VALUES(vin_status),
-                    vehicle_wear            = VALUES(vehicle_wear),
-                    registered_by_citizenid = VALUES(registered_by_citizenid),
-                    assigned_bot_id         = VALUES(assigned_bot_id),
-                    assignment_mode         = VALUES(assignment_mode),
-                    verified_stolen_plate   = VALUES(verified_stolen_plate),
-                    updated_at              = NOW()
-            ]], {
-                v.plate, v.vehicle_class, v.vin_status, v.vehicle_wear,
-                v.registered_by_citizenid, v.assigned_bot_id, v.assignment_mode,
-                v.verified_stolen_plate and 1 or 0
-            })
+            queries[#queries + 1] = {
+                query = [[
+                    INSERT INTO matrix_fleet
+                        (plate, vehicle_class, vin_status, vehicle_wear, registered_by_citizenid,
+                         assigned_bot_id, assignment_mode, verified_stolen_plate, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+                    ON DUPLICATE KEY UPDATE
+                        vehicle_class           = VALUES(vehicle_class),
+                        vin_status              = VALUES(vin_status),
+                        vehicle_wear            = VALUES(vehicle_wear),
+                        registered_by_citizenid = VALUES(registered_by_citizenid),
+                        assigned_bot_id         = VALUES(assigned_bot_id),
+                        assignment_mode         = VALUES(assignment_mode),
+                        verified_stolen_plate   = VALUES(verified_stolen_plate),
+                        updated_at              = NOW()
+                ]],
+                values = {
+                    v.plate, v.vehicle_class, v.vin_status, v.vehicle_wear,
+                    v.registered_by_citizenid, v.assigned_bot_id, v.assignment_mode,
+                    v.verified_stolen_plate and 1 or 0
+                }
+            }
         end
-        dirtyFleet[plate] = nil
+    end
+
+
+    if #queries == 0 then
+        for _, plate in ipairs(pendingPlates) do dirtyFleet[plate] = nil end
+        return
+    end
+
+
+    local ok, result = pcall(function() return MySQL.transaction.await(queries) end)
+    if ok and result ~= false then
+        for _, plate in ipairs(pendingPlates) do dirtyFleet[plate] = nil end
+    else
+        Matrix.Log('LOGISTICS',
+            '[HATA][KRITIK] FlushDirtyFleet transaction basarisiz -- dirty bayraklar KORUNDU, tekrar denenecek: %s',
+            tostring(result))
     end
 end
 
@@ -617,22 +649,49 @@ local function MarkSupplierTrustDirty(citizenid, supplierId)
 end
 
 
+-- ★ CRITICAL FIX: ayni sekilde -- toplu transaction, basari SONRASI bayrak temizligi.
 local function FlushDirtySupplierTrust()
+    local pendingKeys = {}
     for key in pairs(dirtySupplierTrust) do
+        pendingKeys[#pendingKeys + 1] = key
+    end
+    if #pendingKeys == 0 then return end
+
+
+    local queries = {}
+    for _, key in ipairs(pendingKeys) do
         local rec = SupplierTrustCache[key]
         if rec then
-            MySQL.prepare([[
-                INSERT INTO matrix_supplier_trust
-                    (citizenid, supplier_id, trust, late_payments, forensic_leaks, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, NOW(), NOW())
-                ON DUPLICATE KEY UPDATE
-                    trust          = VALUES(trust),
-                    late_payments  = VALUES(late_payments),
-                    forensic_leaks = VALUES(forensic_leaks),
-                    updated_at     = NOW()
-            ]], { rec.citizenid, rec.supplier_id, rec.trust, rec.late_payments, rec.forensic_leaks })
+            queries[#queries + 1] = {
+                query = [[
+                    INSERT INTO matrix_supplier_trust
+                        (citizenid, supplier_id, trust, late_payments, forensic_leaks, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, NOW(), NOW())
+                    ON DUPLICATE KEY UPDATE
+                        trust          = VALUES(trust),
+                        late_payments  = VALUES(late_payments),
+                        forensic_leaks = VALUES(forensic_leaks),
+                        updated_at     = NOW()
+                ]],
+                values = { rec.citizenid, rec.supplier_id, rec.trust, rec.late_payments, rec.forensic_leaks }
+            }
         end
-        dirtySupplierTrust[key] = nil
+    end
+
+
+    if #queries == 0 then
+        for _, key in ipairs(pendingKeys) do dirtySupplierTrust[key] = nil end
+        return
+    end
+
+
+    local ok, result = pcall(function() return MySQL.transaction.await(queries) end)
+    if ok and result ~= false then
+        for _, key in ipairs(pendingKeys) do dirtySupplierTrust[key] = nil end
+    else
+        Matrix.Log('LOGISTICS',
+            '[HATA][KRITIK] FlushDirtySupplierTrust transaction basarisiz -- dirty bayraklar KORUNDU, tekrar denenecek: %s',
+            tostring(result))
     end
 end
 
@@ -1124,18 +1183,29 @@ function Matrix.Logistics.DispatchAmmoRun(sourceBotId, targetBotId, dispatcherSr
 
     local pulled = {}
     for _, entry in ipairs(Config.Logistics.AmmoRunManifest) do
-        local removeOk = pcall(function()
+        -- ★ CRITICAL FIX: RemoveItem'in GERCEK basari boolean'i (2. donus
+        -- degeri) kontrol edilmeden AddItem'e gecilirse, kalem depodan hic
+        -- eksilmeden bota eklenebilir (dupe). Diger tum RemoveItem cagrilariyla
+        -- (server/main.lua DepositDealerCargoToTrapStash vb.) AYNI katı guard.
+        local removeOk, removed = pcall(function()
             return exports['ox_inventory']:RemoveItem(stashId, entry.item, entry.count)
         end)
-        if removeOk then
-            local addOk = pcall(function()
+        if removeOk and removed == true then
+            local addOk, added = pcall(function()
                 return exports['ox_inventory']:AddItem(inventoryId, entry.item, entry.count)
             end)
-            if addOk then
+            if addOk and added == true then
                 pulled[#pulled + 1] = ('%sx%d'):format(entry.item, entry.count)
             else
-                -- Bota eklenemedi (envanter dolu) -- depoya iade et.
-                pcall(function() exports['ox_inventory']:AddItem(stashId, entry.item, entry.count) end)
+                -- Bota eklenemedi (envanter dolu) -- atomik telafi: depoya iade et.
+                local restoreOk, restored = pcall(function()
+                    return exports['ox_inventory']:AddItem(stashId, entry.item, entry.count)
+                end)
+                if not (restoreOk and restored == true) then
+                    Matrix.Log('LOGISTICS',
+                        '[KRITIK] DispatchAmmoRun: %s x%d AddItem+telafi ikisi de basarisiz -- olasi kayip.',
+                        entry.item, entry.count)
+                end
             end
         end
     end

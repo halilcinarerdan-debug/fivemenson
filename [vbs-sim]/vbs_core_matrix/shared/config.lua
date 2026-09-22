@@ -467,7 +467,13 @@ Config.Logistics.TrapHouseArrivalStashRadius = 15.0
 Config.Logistics.AmmoRunManifest = {
     { item = 'weapon_assaultrifle', count = 1  }, -- silahsız AK-47 (Config.BlackMarket.Weapons ile aynı item)
     { item = 'ammo_rifle',          count = 90 }, -- şarjör/mühimmat (Config.BlackMarket.Ammo ile aynı item)
-    { item = 'weapon_spare_barrel', count = 1  }  -- yedek namlu (Config.BlackMarket.SpareBarrelItem ile aynı item)
+    { item = 'weapon_spare_barrel', count = 1  }, -- yedek namlu (Config.BlackMarket.SpareBarrelItem ile aynı item)
+    -- ★ [ENVANTER MANİFESTOSU] Açık Hat (Config.BlackMarket.BurnerPhones ile
+    -- AYNI item) -- lojistik botlar (runner) bunu depodan çekip sahada
+    -- üzerinde telefon olmayan diğer botlara dağıtır. server/bureau.lua
+    -- Matrix.Bureau.StartLivestream artık aktif bir 'burner_phone' zorunlu
+    -- kılar (bkz. o fonksiyonun güncellenmiş yorumu).
+    { item = 'burner_phone',        count = 3  }
 }
 
 
@@ -679,6 +685,10 @@ Config.TrapHouseInterior = {
         EnterCoords  = vector4(261.4586, -998.8196, -99.00863, 0.0),
         WorkbenchPos = vector3(258.303, -997.279, -99.015),
         PackagingPos = vector3(258.303, -994.279, -99.015),
+        -- ★ [KAMERA VERI TEMIZLIGI] Router kutusu -- PackagingPos ILE AYNI
+        -- Y-eksenli ilerleme deseni (3 birim daha oteye), ayni interior
+        -- cebinin icinde. /kameralogutemizle bu konuma yakinlik gerektirir.
+        RouterPos    = vector3(258.303, -991.279, -99.015),
         ExitCoords   = vector4(261.4586, -998.8196, -99.00863, 180.0)
     },
 
@@ -965,6 +975,37 @@ Config.Forensics.TamperGreedThreshold = 0.60  -- personality.greed bu esigin ALT
 -- Skill kapısı YENİ bir sütun İCAT ETMEZ: matrix_bots.psychology.
 -- skill_logistics (fiziksel/kurye) ve skill_cyber (dijital) ZATEN VARDIR.
 -- ---------------------------------------------------------------------
+-- ---------------------------------------------------------------------
+-- [KAMERA VERI TEMIZLIGI] /kameralogutemizle -- oyuncunun kendi dna_id'sine
+-- ait, son 30 dakikaya ait TUM matrix_cctv_logs satirlarini (mobese
+-- gecis + kiyafet kombinasyon izleri) kalici olarak siler. Router kutusuna
+-- (Config.TrapHouseInterior.Shell.RouterPos) fiziksel yakinlik gerektirir --
+-- Matrix.Forensics.HackCCTVNetwork (zone-bazli, MEVCUT) ILE AYNI tabloyu
+-- okur/yazar, YENİ bir tablo İCAT EDİLMEZ.
+-- ---------------------------------------------------------------------
+Config.Forensics.RouterSanitization = {
+    Radius          = 2.0,
+    WindowMinutes   = 30
+}
+
+-- ---------------------------------------------------------------------
+-- [ADLİ RPG] /davaac + /davasorgula -- çift fazlı mahkeme ifade zinciri
+-- (server/bureau.lua). Mahkumiyet Skoru, Propaganda momentumuyla AYNI
+-- geometrik tırmanma şekli (a*x+b, tavan 1.0) kullanır -- yeni bir
+-- matematiksel biçim İCAT EDİLMEZ, yalnızca bu mekaniğe özgü katsayılar
+-- eklenir.
+-- ---------------------------------------------------------------------
+Config.Bureau.TrialConvictionGeometricFactor = 1.5
+Config.Bureau.TrialConvictionIncrement       = 0.15
+
+-- ---------------------------------------------------------------------
+-- [KOR NOKTA] KOMA MODU -- bot.biology.withdrawal_index (ZATEN VAR OLAN
+-- alan, YENİ bir "under_influence" alanı İCAT EDİLMEZ) >= 1.0 olduğunda
+-- status='comatose' kilitlenir; bu süre boyunca müdahale edilmezse
+-- 'deceased' arşivine düşer.
+-- ---------------------------------------------------------------------
+Config.Kitchen.ComaToDeceasedRealHours = 2
+
 Config.Forensics.ShellCasingEvidenceItem          = 'shell_casing_evidence'
 Config.Forensics.ShellCollectionRadiusMeters      = 3.0
 Config.Forensics.ShellCollectionBaseDurationMs    = 8000  -- skill_logistics=0 iken sure

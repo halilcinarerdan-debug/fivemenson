@@ -276,16 +276,16 @@ function Matrix.MarkBotDirty(botId)
 end
 
 
-local BOT_ROW_SQL = '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())'
+local BOT_ROW_SQL = '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())'
 local BOT_UPSERT_HEAD =
-    'INSERT INTO matrix_bots (id, dna_id, name, role, status, ' ..
+    'INSERT INTO matrix_bots (id, dna_id, name, role, status, handler_citizenid, ' ..
     'fear_factor, resilience, snitch_tendency, economic_pressure, cognitive_shifter, skill_chemistry, ' ..
     'skill_cyber, skill_logistics, loyalty_base, ' ..
     'fatigue_level, cortisol_level, withdrawal_index, addiction_level, base_cortisol_recovery_rate, ' ..
     'trap_house_id, updated_at) VALUES '
 local BOT_UPSERT_TAIL =
     ' ON DUPLICATE KEY UPDATE ' ..
-    'name=VALUES(name), role=VALUES(role), status=VALUES(status), ' ..
+    'name=VALUES(name), role=VALUES(role), status=VALUES(status), handler_citizenid=VALUES(handler_citizenid), ' ..
     'fear_factor=VALUES(fear_factor), resilience=VALUES(resilience), ' ..
     'snitch_tendency=VALUES(snitch_tendency), economic_pressure=VALUES(economic_pressure), ' ..
     'cognitive_shifter=VALUES(cognitive_shifter), skill_chemistry=VALUES(skill_chemistry), ' ..
@@ -315,6 +315,7 @@ local function BuildBotUpsert(botList)
         params[idx] = b.name                                 ; idx = idx + 1
         params[idx] = b.role                                 ; idx = idx + 1
         params[idx] = b.status                               ; idx = idx + 1
+        params[idx] = b.handler_citizenid                    ; idx = idx + 1
         params[idx] = b.psychology.fear_factor               ; idx = idx + 1
         params[idx] = b.psychology.resilience                ; idx = idx + 1
         params[idx] = b.psychology.snitch_tendency           ; idx = idx + 1
@@ -338,30 +339,48 @@ local function BuildBotUpsert(botList)
 end
 
 
+-- ★ CRITICAL FIX: eskiden MySQL.prepare(query, params) "ates et ve unut"
+-- cagrilir cagrilmaz -- sonuc HIC beklenmeden -- dirtyBots bayraklari ayni
+-- dongude ANINDA temizleniyordu. Transaction sessizce basarisiz olsa bile
+-- RAM zaten "temiz" sayiliyordu -- degisiklik asla DB'ye yazilmamis
+-- OLABILIRDI (sessiz veri kaybi/tutarsizlik). Simdi TUM batch TEK bir
+-- MySQL.transaction.await ile kilitlenir; RAM bayraklari SADECE VE SADECE
+-- transaction basariyla (true) bittiginde temizlenir.
 function Matrix.FlushDirtyBots()
     local dirty = P.dirtyBots
     if not next(dirty) then return 0 end
 
 
-    local batch, count = {}, 0
+    local batch, ids, count = {}, {}, 0
     for id in pairs(dirty) do
         local bot = Matrix.Bots[id]
         if bot then
             count = count + 1
             batch[count] = bot
+            ids[count] = id
+        else
+            -- Bot artik mevcut degil -- persist edilecek bir sey kalmadi,
+            -- bayrak guvenle hemen temizlenebilir (kayip veri riski YOK).
+            dirty[id] = nil
         end
-        dirty[id] = nil
         if count >= P.botFlushMaxBatch then break end
     end
     if count == 0 then return 0 end
 
 
     local query, params = BuildBotUpsert(batch)
-    if query then
-        local ok, err = pcall(function() MySQL.prepare(query, params) end)
-        if not ok then
-            Matrix.Log('CORE', '[HATA] FlushDirtyBots basarisiz (yutuldu): %s', tostring(err))
-        end
+    if not query then return 0 end
+
+
+    local ok, result = pcall(function()
+        return MySQL.transaction.await({ { query = query, values = params } })
+    end)
+    if ok and result ~= false then
+        for i = 1, count do dirty[ids[i]] = nil end
+    else
+        Matrix.Log('CORE',
+            '[HATA][KRITIK] FlushDirtyBots transaction basarisiz -- dirty bayraklar KORUNDU, tekrar denenecek: %s',
+            tostring(result))
     end
     return count
 end
@@ -401,6 +420,10 @@ function Matrix.CreateBotRecord(profile)
         name   = profile.name   or ('Operative-%d'):format(id),
         role   = profile.role   or 'runner',
         status = 'active',
+        -- ★ [ADLI RPG] bkz. LoadBotsFromDatabase yorumu -- opsiyonel,
+        -- botu bir oyuncu citizenid'sine baglar (Karakter Wipe/ExecuteVerdict
+        -- bulk-disband hedeflemesi icin).
+        handler_citizenid = profile.handler_citizenid,
         psychology = {
             fear_factor       = Matrix.Clamp(profile.fear_factor or 0.0,       0.0, 1.0),
             resilience        = Matrix.Clamp(profile.resilience or 0.5,        0.0, 1.0),
@@ -476,6 +499,22 @@ function Matrix.RemoveBot(id, reason)
     bot.status = reason or 'burned'
     local query, params = BuildBotUpsert({ bot })
     if query then MySQL.prepare(query, params) end
+
+
+    -- ★ [OTONOM ALT HUCRE BOLUNMESI] Bot bir cete lideriyse (role=='Leader')
+    -- ve 'deceased' olarak dusuyorsa, o trap house'a bagli TUM otonom
+    -- Toplu Satis Hub'larinin FragmentTerritory ile Alt Hucrelere
+    -- bolunmesini tetikle -- 'matrix:internal:bureauLockdown' ILE AYNI
+    -- pasif/loose-coupling event deseni (bkz. server/district_hubs.lua).
+    if reason == 'deceased' and bot.role == 'Leader' and bot.state and bot.state.trap_house_id then
+        local deadLeaderTrapHouseId = bot.state.trap_house_id
+        local fragOk, fragErr = pcall(function()
+            TriggerEvent('matrix:internal:gangLeaderDeceased', deadLeaderTrapHouseId, id)
+        end)
+        if not fragOk then
+            Matrix.Log('CORE', '[HATA] gangLeaderDeceased yayini basarisiz (yutuldu): %s', tostring(fragErr))
+        end
+    end
 
 
     P.dirtyBots[id] = nil
@@ -598,6 +637,11 @@ local function LoadBotsFromDatabase()
         Matrix.Bots[row.id] = {
             id = row.id, dna_id = row.dna_id, name = row.name,
             role = row.role, status = row.status,
+            -- ★ [ADLI RPG] Botu bir citizenid'ye baglar (or. /cetelideriata
+            -- ile atanan cete lideri) -- server/bureau.lua ExecuteVerdict
+            -- (karakter wipe) bu alandan o citizenid'ye bagli TUM botlari
+            -- 'disbanded' moduna cekmek icin bulur.
+            handler_citizenid = row.handler_citizenid,
             psychology = {
                 fear_factor       = row.fear_factor       or 0.0,
                 resilience        = row.resilience        or 0.5,
@@ -1361,17 +1405,46 @@ function Matrix.DepositDealerCargoToTrapStash(botId, trapHouseId)
     end)
 
 
+    -- ★ CRITICAL DUPE FIX: sira KESINLIKLE ONCE-CIKAR SONRA-EKLE olmali.
+    -- Eski sira (once AddItem, sonra pcall-ortulu RemoveItem) RemoveItem'in
+    -- GERCEK basari degerini hic okumuyordu -- RemoveItem sessizce false
+    -- donse bile esya dealer envanterinde KALIYOR ve stash'e de EKLENMIS
+    -- oluyordu (sinirsiz dupe). Simdi: esya ONCE kaynaktan (katı guard ile)
+    -- cikarilir; ancak bu KANITLANDIKTAN SONRA hedefe eklenir. AddItem
+    -- basarisiz olursa, esya ATOMIK TELAFI ile bota (inventoryId) sessizce
+    -- geri iade edilir -- ne dupe, ne kayip.
     local movedAny = false
     for slot, item in pairs(inv.items) do
         if type(item) == 'table' and type(item.name) == 'string' and (tonumber(item.count) or 0) > 0 then
-            local addOk = pcall(function()
-                return exports['ox_inventory']:AddItem(stashId, item.name, item.count, item.metadata)
+            local itemName, itemCount, itemMeta = item.name, item.count, item.metadata
+
+            local removeOk, removed = pcall(function()
+                return exports['ox_inventory']:RemoveItem(inventoryId, itemName, itemCount, itemMeta, slot)
             end)
-            if addOk then
-                pcall(function()
-                    exports['ox_inventory']:RemoveItem(inventoryId, item.name, item.count, item.metadata, slot)
+
+            if removeOk and removed == true then
+                local addOk, added = pcall(function()
+                    return exports['ox_inventory']:AddItem(stashId, itemName, itemCount, itemMeta)
                 end)
-                movedAny = true
+
+                if addOk and added == true then
+                    movedAny = true
+                else
+                    -- ★ ATOMIK TELAFI: AddItem basarisiz oldu (stash dolu/
+                    -- reddedildi vb.) -- esya zaten kaynaktan cikarilmisti,
+                    -- bu yuzden sessizce bot envanterine (inventoryId) geri
+                    -- verilir. Bu adim da basarisiz olursa kayip en azindan
+                    -- Matrix.Log ile IZLENEBILIR kalir (sahte bir "tasindi"
+                    -- iddiasi asla URETILMEZ).
+                    local restoreOk, restored = pcall(function()
+                        return exports['ox_inventory']:AddItem(inventoryId, itemName, itemCount, itemMeta)
+                    end)
+                    if not (restoreOk and restored == true) then
+                        Matrix.Log('CORE',
+                            '[KRITIK] DepositDealerCargoToTrapStash: Bot #%d, esya (%s x%s) AddItem+telafi ikisi de basarisiz -- olasi kayip.',
+                            botId, tostring(itemName), tostring(itemCount))
+                    end
+                end
             end
         end
     end
@@ -2385,6 +2458,42 @@ RegisterCommand('operatiftasfiye', function(src, args)
     else
         NotifyResult(src, false, ('Bot #%d tasfiye edilemedi.'):format(botId))
     end
+end, false)
+
+
+-- =====================================================================
+-- ★ [OTONOM ALT HUCRE BOLUNMESI] /cetelideriata — bir botu, F10 "Denetleyici
+-- Ata" (Matrix.Inspector.AssignInspector) ILE AYNI yetki/terfi desenini
+-- kullanarak o trap house'un otonom cete lideri ('Leader') olarak isaretler.
+-- Lider status='deceased' oldugunda (bkz. Matrix.RemoveBot yukarida) bu
+-- isaret, server/district_hubs.lua FragmentTerritory'yi tetikler.
+-- =====================================================================
+RegisterCommand('cetelideriata', function(src, args)
+    local botId       = tonumber(args[1])
+    local trapHouseId = tonumber(args[2])
+    if not botId or not trapHouseId or not Matrix.Bots[botId] or not Matrix.TrapHouses[trapHouseId] then
+        Reply(src, 'Kullanim: /cetelideriata [botId] [trapHouseId (gecerli olmali)]'); return
+    end
+
+
+    if Matrix.Hierarchy and Matrix.Hierarchy.HasCommandAuthority then
+        local assignerState = Matrix.GetOrCreatePlayerState(src)
+        if not assignerState or not assignerState.citizenid or not Matrix.Hierarchy.HasCommandAuthority(assignerState.citizenid) then
+            Reply(src, 'Bu atamayi yapmak icin yeterli rutbeniz yok (Logistics_Officer veya Leader gerekir).'); return
+        end
+    end
+
+
+    local bot = Matrix.Bots[botId]
+    bot.role = 'Leader'
+    bot.state.trap_house_id = trapHouseId
+    local assignerState = Matrix.GetOrCreatePlayerState(src)
+    bot.handler_citizenid = assignerState and assignerState.citizenid
+    Matrix.MarkBotDirty(botId)
+
+
+    Reply(src, ('Bot #%d, Trap #%d icin otonom cete lideri ("Leader") olarak atandi.'):format(botId, trapHouseId))
+    Matrix.Log('CORE', '[CETE LIDERI ATANDI] Bot #%d -> Trap #%d', botId, trapHouseId)
 end, false)
 
 

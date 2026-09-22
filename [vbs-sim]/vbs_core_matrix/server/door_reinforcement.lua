@@ -87,14 +87,37 @@ CreateThread(function()
 end)
 
 
+-- ★ CRITICAL FIX: toplu MySQL.transaction.await; RAM bayraklari SADECE
+-- basari sonrasi temizlenir.
 local function FlushDirtyLevels()
-    for trapHouseId, citizenid in pairs(dirtyLevel) do
-        MySQL.prepare([[
-            INSERT INTO matrix_door_reinforcement (trap_house_id, level, installed_by_citizenid, updated_at)
-            VALUES (?, ?, ?, NOW())
-            ON DUPLICATE KEY UPDATE level = VALUES(level), installed_by_citizenid = VALUES(installed_by_citizenid), updated_at = NOW()
-        ]], { trapHouseId, DoorLevel[trapHouseId] or 0, citizenid })
-        dirtyLevel[trapHouseId] = nil
+    local pendingHouses = {}
+    for trapHouseId in pairs(dirtyLevel) do
+        pendingHouses[#pendingHouses + 1] = trapHouseId
+    end
+    if #pendingHouses == 0 then return end
+
+
+    local queries = {}
+    for _, trapHouseId in ipairs(pendingHouses) do
+        local citizenid = dirtyLevel[trapHouseId]
+        queries[#queries + 1] = {
+            query = [[
+                INSERT INTO matrix_door_reinforcement (trap_house_id, level, installed_by_citizenid, updated_at)
+                VALUES (?, ?, ?, NOW())
+                ON DUPLICATE KEY UPDATE level = VALUES(level), installed_by_citizenid = VALUES(installed_by_citizenid), updated_at = NOW()
+            ]],
+            values = { trapHouseId, DoorLevel[trapHouseId] or 0, citizenid }
+        }
+    end
+
+
+    local ok, result = pcall(function() return MySQL.transaction.await(queries) end)
+    if ok and result ~= false then
+        for _, trapHouseId in ipairs(pendingHouses) do dirtyLevel[trapHouseId] = nil end
+    else
+        Matrix.Log('DOORREINFORCEMENT',
+            '[HATA][KRITIK] FlushDirtyLevels transaction basarisiz -- dirty bayraklar KORUNDU, tekrar denenecek: %s',
+            tostring(result))
     end
 end
 

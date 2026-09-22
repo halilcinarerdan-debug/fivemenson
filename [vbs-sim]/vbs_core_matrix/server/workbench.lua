@@ -205,14 +205,38 @@ CreateThread(function()
 end)
 
 
+-- ★ CRITICAL FIX: toplu MySQL.transaction.await; RAM bayraklari SADECE
+-- basari sonrasi temizlenir (bkz. server/logistics.lua FlushDirtyFleet ile
+-- AYNI desen).
 local function FlushDirtyPackaging()
-    for trapHouseId, citizenid in pairs(dirtyPackaging) do
-        MySQL.prepare([[
-            INSERT INTO matrix_packaging_room_state (trap_house_id, active, started_by_citizenid, updated_at)
-            VALUES (?, ?, ?, NOW())
-            ON DUPLICATE KEY UPDATE active = VALUES(active), started_by_citizenid = VALUES(started_by_citizenid), updated_at = NOW()
-        ]], { trapHouseId, PackagingActive[trapHouseId] and 1 or 0, citizenid })
-        dirtyPackaging[trapHouseId] = nil
+    local pendingHouses = {}
+    for trapHouseId in pairs(dirtyPackaging) do
+        pendingHouses[#pendingHouses + 1] = trapHouseId
+    end
+    if #pendingHouses == 0 then return end
+
+
+    local queries = {}
+    for _, trapHouseId in ipairs(pendingHouses) do
+        local citizenid = dirtyPackaging[trapHouseId]
+        queries[#queries + 1] = {
+            query = [[
+                INSERT INTO matrix_packaging_room_state (trap_house_id, active, started_by_citizenid, updated_at)
+                VALUES (?, ?, ?, NOW())
+                ON DUPLICATE KEY UPDATE active = VALUES(active), started_by_citizenid = VALUES(started_by_citizenid), updated_at = NOW()
+            ]],
+            values = { trapHouseId, PackagingActive[trapHouseId] and 1 or 0, citizenid }
+        }
+    end
+
+
+    local ok, result = pcall(function() return MySQL.transaction.await(queries) end)
+    if ok and result ~= false then
+        for _, trapHouseId in ipairs(pendingHouses) do dirtyPackaging[trapHouseId] = nil end
+    else
+        Matrix.Log('WORKBENCH',
+            '[HATA][KRITIK] FlushDirtyPackaging transaction basarisiz -- dirty bayraklar KORUNDU, tekrar denenecek: %s',
+            tostring(result))
     end
 end
 

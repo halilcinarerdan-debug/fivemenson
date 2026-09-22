@@ -303,6 +303,13 @@ function Matrix.Bureau.AdvanceDecryption(trapHouseId, amount)
     if amount ~= amount then amount = 0.0 end
 
 
+    -- ★ [GLOBAL CONVAR] server.cfg'deki 'matrix_bureau_intensity' ConVar'i
+    -- ile CANLI/uzaktan olceklenir (bkz. Matrix.Bureau.GetBureaucraticVelocity,
+    -- dosya sonu). Buro'nun TUM ogrenme/desifre kazanclari BU TEK noktadan
+    -- gectigi icin ayri bir "devriye frekansi" carpani ICAT EDILMEZ.
+    amount = amount * Matrix.Bureau.GetBureaucraticVelocity()
+
+
     house.decryption_confidence = Matrix.Clamp(house.decryption_confidence + amount, 0.0, 1.0)
     dirtyDecryption[trapHouseId] = true
 
@@ -680,6 +687,20 @@ function Matrix.Bureau.StartLivestream(src)
     if LivestreamSessions[src] then return false end
 
 
+    -- ★ [ENVANTER MANİFESTOSU] Bir aktörün (oyuncu veya bot -- bu fonksiyon
+    -- HER iki cagiran icin de TEK giris noktasidir) canli yayin baslatabilmesi
+    -- icin uzerinde aktif bir 'burner_phone' (Config.Logistics.AmmoRunManifest
+    -- ile lojistik botlarca sahada dagitilan item, bkz. shared/config.lua)
+    -- bulunmasi ZORUNLUDUR.
+    local searchOk, phoneCount = pcall(function()
+        return exports['ox_inventory']:Search(src, 'count', 'burner_phone')
+    end)
+    if not searchOk or (tonumber(phoneCount) or 0) <= 0 then
+        Matrix.Log('BUREAU', '[YAYIN REDDEDILDI] src=%s ustunde aktif burner_phone yok.', tostring(src))
+        return false
+    end
+
+
     local state = Matrix.GetOrCreatePlayerState(src)
     LivestreamSessions[src] = {
         started    = Matrix.Now(),
@@ -728,8 +749,22 @@ CreateThread(function()
         Wait(1000)
         for src, session in pairs(LivestreamSessions) do
             local ped = GetPlayerPed(src)
+            -- ★ [KOR NOKTA] Aktif yayin, uzerinde bir 'burner_phone'
+            -- (Config.BlackMarket.BurnerPhones) olmasini ZORUNLU kilar --
+            -- eldeki hat cebinden cikarsa (satildi/el konuldu/vs.) yayin
+            -- ANINDA kesilir. RNG YOK -- salt bir envanter varlik kontrolu.
+            local searchOk, phoneCount = pcall(function()
+                return exports['ox_inventory']:Search(src, 'count', 'burner_phone')
+            end)
+            local hasBurnerPhone = searchOk and (tonumber(phoneCount) or 0) > 0
+
+
             if not ped or ped == 0 then
                 LivestreamSessions[src] = nil
+            elseif not hasBurnerPhone then
+                Matrix.Log('BUREAU',
+                    '[YAYIN ZORLA KESILDI] src=%d ustunde aktif burner_phone bulunamadi -- StopLivestream tetiklendi.', src)
+                Matrix.Bureau.StopLivestream(src)
             else
                 session.hype = math_min(
                     (session.hype * Config.Bureau.LivestreamHypeGeometricFactor) + Config.Bureau.LivestreamHypeIncrementPerTick,
@@ -2129,3 +2164,433 @@ end, false)
 
 exports('GetFearCoefficient', function() return Matrix.Bureau.GetFearCoefficient() end)
 exports('GetEffectiveSnitchThreshold', function() return Matrix.Bureau.GetEffectiveSnitchThreshold() end)
+
+
+-- =====================================================================
+-- ★★★ [GLOBAL CONVAR] GetBureaucraticVelocity — server.cfg UZAKTAN AYARI ★★★
+-- 'matrix_bureau_intensity' ConVar'i (server.cfg icine 'set matrix_bureau_
+-- intensity 1.5' eklenerek) Buro'nun TUM ogrenme/desifre kazanclarini
+-- (Matrix.Bureau.AdvanceDecryption, dosya basi -- TUM cagiranlarin ORTAK
+-- gectigi TEK nokta) VE devriye frekanslarini (server/market.lua Inspector.
+-- ScanForMoles dongusu) CANLI/uzaktan olcekler. Varsayilan 1.0 = eski
+-- davranisla BIREBIR AYNI. RNG YOK -- salt bir ConVar okuma + guvenli
+-- sinir kontrolu (NaN/negatif/sifir degerler 1.0'a duser).
+-- =====================================================================
+function Matrix.Bureau.GetBureaucraticVelocity()
+    local intensity = GetConvarFloat('matrix_bureau_intensity', 1.0)
+    if type(intensity) ~= 'number' or intensity ~= intensity or intensity <= 0.0 then
+        intensity = 1.0
+    end
+    return intensity
+end
+
+
+exports('GetBureaucraticVelocity', function() return Matrix.Bureau.GetBureaucraticVelocity() end)
+
+
+-- =====================================================================
+-- ★★★ [ADLİ RPG] MAHKEME İFADE ZİNCİRİ — /davaac + /davasorgula ★★★
+-- Çift fazlı diyalog: FAZ 1 (/davaac) kanıtı (matrix_forensic_evidence
+-- ballistic_id/match_certainty, ZATEN VAR OLAN alanlar) sunar; FAZ 2
+-- (/davasorgula) sanığın ifadesini ('itiraf' | 'yalan') işler. Yalan,
+-- kanıt eşiği (Config.Forensics.MatchCertaintyThreshold) aşılmışken
+-- verilirse lie_count artar ve conviction_weight Propaganda momentumuyla
+-- AYNI geometrik şekilde (a*x+b, tavan 1.0) tırmanır. %100'de
+-- ExecuteVerdict (Karakter Wipe) tetiklenir.
+--
+-- AI_Matrix_Brain.enabled=true iken deterministik veriler AYNEN hesaplanir
+-- (kilit/mahkumiyet kararı BU köprüyü ASLA beklemez) -- yalnızca sunulan
+-- ANLATI metni asenkron olarak OpenAI'dan istenir (RunAIAdvisoryPass ile
+-- AYNI PerformHttpRequest deseni).
+-- =====================================================================
+local TrialSessions = {} -- [defendantCitizenid] = { defendant_src, defendant_citizenid, dna_id, ballistic_id, match_certainty, lie_count, conviction_weight, opened_at }
+
+
+function Matrix.Bureau.RequestAITrialNarrative(officerSrc, session)
+    if Config.AI_Matrix_Brain.provider ~= 'openai' or not Config.AI_Matrix_Brain.apiKey or Config.AI_Matrix_Brain.apiKey == 'sk-...' then
+        Reply(officerSrc, '[ADLİ İFADE] enabled=true fakat apiKey yapılandırılmamış; deterministik veriler değişmeden gösteriliyor.')
+        Reply(officerSrc, ('Sanık DNA:%s | Eşleşme: %%%.1f'):format(session.dna_id, session.match_certainty * 100.0))
+        return
+    end
+
+
+    local body = json.encode({
+        model = 'gpt-4o-mini',
+        messages = {
+            { role = 'system', content = 'You are a Turkish-speaking courtroom narrator for a fictional GTA roleplay server. Given deterministic forensic match data, write a short reasoned (gerekceli) verdict narrative in Turkish. Never invent data beyond what is given, never claim it is a real legal proceeding.' },
+            { role = 'user', content = json.encode({
+                dna_id          = session.dna_id,
+                ballistic_id    = session.ballistic_id,
+                match_certainty = session.match_certainty
+            }) }
+        }
+    })
+
+
+    PerformHttpRequest('https://api.openai.com/v1/chat/completions', function(statusCode, response)
+        if statusCode ~= 200 then
+            Reply(officerSrc, ('[ADLİ İFADE] OpenAI istegi basarisiz (HTTP %s); deterministik motor degismeden devam ediyor.'):format(tostring(statusCode)))
+            return
+        end
+        local ok, decoded = pcall(json.decode, response)
+        if not ok or not decoded.choices or not decoded.choices[1] then
+            Reply(officerSrc, '[ADLİ İFADE] OpenAI yaniti cozumlenemedi.')
+            return
+        end
+        local narrative = decoded.choices[1].message and decoded.choices[1].message.content
+        Reply(officerSrc, '[MAHKEME KARARI - AI GEREKCE]')
+        Reply(officerSrc, tostring(narrative or 'Anlati uretilemedi.'))
+    end, 'POST', body, {
+        ['Content-Type']  = 'application/json',
+        ['Authorization'] = 'Bearer ' .. Config.AI_Matrix_Brain.apiKey
+    })
+end
+
+
+--- FAZ 1: dava dosyasi acar, dnaId'nin matrix_forensic_evidence ortalama
+--- match_certainty'sini okur, TrialSessions'a yazar ve matrix_trial_records'a
+--- 'pending' bir satir ekler.
+function Matrix.Bureau.OpenTrial(officerSrc, defendantSrc, dnaId)
+    defendantSrc = tonumber(defendantSrc)
+    if not defendantSrc or type(dnaId) ~= 'string' or dnaId == '' then return false, 'bad_args' end
+
+
+    local defendantState = Matrix.GetOrCreatePlayerState(defendantSrc)
+    if not defendantState or not defendantState.citizenid then return false, 'defendant_unresolved' end
+
+
+    local rows = MySQL.query.await(
+        'SELECT ballistic_id, match_certainty FROM matrix_forensic_evidence WHERE fingerprint_id = ? ORDER BY match_certainty DESC',
+        { dnaId }) or {}
+
+
+    local ballisticId, matchCertainty = nil, 0.0
+    if rows[1] then
+        ballisticId = rows[1].ballistic_id
+        local total = 0.0
+        for _, r in ipairs(rows) do total = total + (tonumber(r.match_certainty) or 0.0) end
+        matchCertainty = total / #rows
+    end
+
+
+    local session = {
+        defendant_src       = defendantSrc,
+        defendant_citizenid = defendantState.citizenid,
+        dna_id              = dnaId,
+        ballistic_id        = ballisticId,
+        match_certainty     = matchCertainty,
+        lie_count           = 0,
+        conviction_weight   = matchCertainty,
+        opened_at           = Matrix.Now()
+    }
+    TrialSessions[defendantState.citizenid] = session
+
+
+    MySQL.insert([[
+        INSERT INTO matrix_trial_records
+            (defendant_citizenid, dna_id, ballistic_id, match_certainty, lie_count, conviction_weight, verdict, opened_at)
+        VALUES (?, ?, ?, ?, 0, ?, 'pending', NOW())
+    ]], { defendantState.citizenid, dnaId, ballisticId, matchCertainty, matchCertainty })
+
+
+    if not Config.AI_Matrix_Brain.enabled then
+        Reply(officerSrc,
+            ('[ADLİ İFADE - FAZ 1] Sanik DNA:%s | Namlu izi eslesmesi: %%%.1f%s'):format(
+                dnaId, matchCertainty * 100.0,
+                ballisticId and (' (Balistik #%s)'):format(ballisticId) or ' (eslesen balistik kaydi yok)'))
+        Reply(officerSrc,
+            matchCertainty >= Config.Forensics.MatchCertaintyThreshold
+                and 'Kanitlar saniği dogrudan isaret ediyor. /davasorgula ile ifadesini sorgulayin.'
+                or 'Kanitlar zayif. Sanik makul bir itirazla temize cikabilir.')
+    else
+        Reply(officerSrc, '[ADLİ İFADE - FAZ 1] Dava dosyasi OpenAI analiz koprusune gonderildi, gerekceli karar hazirlaniyor...')
+        pcall(Matrix.Bureau.RequestAITrialNarrative, officerSrc, session)
+    end
+
+
+    return true, session
+end
+
+
+--- FAZ 2: sanığın ifadesini işler ('itiraf' -> conviction_weight=1.0 aninda;
+--- 'yalan' + kanit esigi asilmisken -> lie_count++, conviction_weight
+--- geometrik tirmanir). %100'de ExecuteVerdict tetiklenir.
+function Matrix.Bureau.RecordTrialResponse(officerSrc, defendantSrc, responseKind)
+    defendantSrc = tonumber(defendantSrc)
+    if not defendantSrc then return false, 'bad_args' end
+
+
+    local defendantState = Matrix.GetOrCreatePlayerState(defendantSrc)
+    if not defendantState or not defendantState.citizenid then return false, 'defendant_unresolved' end
+
+
+    local session = TrialSessions[defendantState.citizenid]
+    if not session then return false, 'no_open_case' end
+
+
+    responseKind = tostring(responseKind or ''):lower()
+    local isLie       = (responseKind == 'yalan' or responseKind == 'inkar')
+    local isConfession = (responseKind == 'itiraf' or responseKind == 'dogru')
+    if not isLie and not isConfession then return false, 'bad_response_kind' end
+
+
+    if isConfession then
+        session.conviction_weight = 1.0
+    else
+        if session.match_certainty >= Config.Forensics.MatchCertaintyThreshold then
+            session.lie_count = session.lie_count + 1
+            session.conviction_weight = math_min(
+                (session.conviction_weight * Config.Bureau.TrialConvictionGeometricFactor) + Config.Bureau.TrialConvictionIncrement,
+                1.0
+            )
+        end
+    end
+
+
+    MySQL.prepare([[
+        UPDATE matrix_trial_records
+        SET lie_count = ?, conviction_weight = ?
+        WHERE defendant_citizenid = ? AND verdict = 'pending'
+        ORDER BY opened_at DESC LIMIT 1
+    ]], { session.lie_count, session.conviction_weight, session.defendant_citizenid })
+
+
+    Reply(officerSrc, ('[ADLİ İFADE - FAZ 2] Yalan-Sayaci:%d | Mahkumiyet-Skoru:%%%.1f'):format(
+        session.lie_count, session.conviction_weight * 100.0))
+
+
+    if session.conviction_weight >= 1.0 then
+        Matrix.Bureau.ExecuteVerdict(officerSrc, session)
+        TrialSessions[session.defendant_citizenid] = nil
+        return true, { verdict = 'imprisoned' }
+    end
+
+
+    return true, { verdict = 'pending' }
+end
+
+
+--- ExecuteVerdict (Karakter Wipe): matrix_player_state.imprisoned=1, dava
+--- dosyasi kapatilir, o citizenid'ye bagli (bot.handler_citizenid, bkz.
+--- server/main.lua) TUM otonom botlar 'disbanded' moduna cekilir (sahipsiz
+--- hucre BIRAKMAZ), ardindan oyuncu DropPlayer ile tekmelenir.
+function Matrix.Bureau.ExecuteVerdict(officerSrc, session)
+    local citizenid   = session.defendant_citizenid
+    local defendantSrc = session.defendant_src
+
+
+    MySQL.prepare('UPDATE matrix_player_state SET imprisoned = 1 WHERE citizenid = ?', { citizenid })
+    MySQL.prepare([[
+        UPDATE matrix_trial_records
+        SET verdict = 'imprisoned', lie_count = ?, conviction_weight = 1.0, closed_at = NOW()
+        WHERE defendant_citizenid = ? AND verdict = 'pending'
+    ]], { session.lie_count, citizenid })
+
+
+    -- ★ [KOR NOKTA] o citizenid'ye bagli TUM otonom botlari topluca
+    -- 'disbanded' moduna cek -- sahipsiz hucre BIRAKMA.
+    local dbOk, dbErr = pcall(function()
+        return MySQL.query.await('UPDATE matrix_bots SET status = ? WHERE handler_citizenid = ?', { 'disbanded', citizenid })
+    end)
+    if not dbOk then
+        Matrix.Log('BUREAU', '[HATA] ExecuteVerdict bulk-disband DB guncellemesi basarisiz: %s', tostring(dbErr))
+    end
+
+
+    local disbandedCount = 0
+    for id, bot in pairs(Matrix.Bots) do
+        if bot.handler_citizenid == citizenid then
+            if Matrix.Dispatches and Matrix.Dispatches[id] then
+                Matrix.DespawnDispatchEntity(id, Matrix.Dispatches[id])
+                Matrix.Dispatches[id] = nil
+            end
+            Matrix.Bots[id] = nil
+            disbandedCount = disbandedCount + 1
+        end
+    end
+
+
+    Matrix.Log('BUREAU',
+        '[KARAKTER WIPE - MAHKUM] %s -> imprisoned=1, %d bagli otonom bot disbanded moduna cekildi.',
+        citizenid, disbandedCount)
+
+
+    Reply(officerSrc, ('[MAHKEME KARARI] %s -> %%100 Mahkumiyet Skoru. Karakter kilitlendi ve sunucudan tekmelendi.'):format(citizenid))
+
+
+    if defendantSrc then
+        pcall(function()
+            DropPlayer(defendantSrc, 'MAHKUM EDILDINIZ: Adli surec sonucunda karakteriniz kalici olarak muhurlendi.')
+        end)
+    end
+end
+
+
+RegisterCommand('davaac', function(src, args)
+    local defendantSrc = tonumber(args[1])
+    local dnaId = args[2]
+    if not defendantSrc or type(dnaId) ~= 'string' then
+        Reply(src, 'Kullanim: /davaac [defendantRef(src)] [dnaId]'); return
+    end
+    local ok, resultOrReason = Matrix.Bureau.OpenTrial(src, defendantSrc, dnaId)
+    if not ok then
+        Reply(src, ('Dava acilamadi: %s'):format(tostring(resultOrReason)))
+    end
+end, false)
+
+
+RegisterCommand('davasorgula', function(src, args)
+    local defendantSrc = tonumber(args[1])
+    local responseKind = args[2]
+    if not defendantSrc or not responseKind then
+        Reply(src, 'Kullanim: /davasorgula [defendantRef(src)] [itiraf|yalan]'); return
+    end
+    local ok, resultOrReason = Matrix.Bureau.RecordTrialResponse(src, defendantSrc, responseKind)
+    if not ok then
+        Reply(src, ('Sorgu basarisiz: %s'):format(tostring(resultOrReason)))
+    end
+end, false)
+
+
+exports('OpenTrial', function(officerSrc, defendantSrc, dnaId) return Matrix.Bureau.OpenTrial(officerSrc, defendantSrc, dnaId) end)
+exports('RecordTrialResponse', function(officerSrc, defendantSrc, responseKind) return Matrix.Bureau.RecordTrialResponse(officerSrc, defendantSrc, responseKind) end)
+
+
+-- =====================================================================
+-- ★★★ [KOR NOKTA] /telefonuyoket — TELEFON HATTI ADLİ SABOTAJI ★★★
+-- Oyuncunun kendi (veya opsiyonel dnaId argumaniyla hedeflenen) hattina ait
+-- kriptolu mesajlari (matrix_encrypted_messages, YENİ tablo) VE o hatta
+-- bagli, HENUZ 'sealed_as_crime_weapon' ile KESINLESMEMIS siber sinyal
+-- delillerini (matrix_forensic_evidence WHERE evidence_type='cyber') TEK
+-- bir atomik transaction ile kalici olarak siler.
+-- =====================================================================
+function Matrix.Bureau.SabotagePhoneLine(src, dnaId)
+    if type(src) ~= 'number' or src <= 0 then return false, 'bad_src' end
+
+
+    if type(dnaId) ~= 'string' or dnaId == '' then
+        local state = Matrix.GetOrCreatePlayerState(src)
+        dnaId = state and state.dna_id
+    end
+    if type(dnaId) ~= 'string' or dnaId == '' then return false, 'bad_dna' end
+
+
+    local queries = {
+        { query = 'DELETE FROM matrix_encrypted_messages WHERE dna_id = ?', values = { dnaId } },
+        { query = "DELETE FROM matrix_forensic_evidence WHERE fingerprint_id = ? AND evidence_type = 'cyber' AND sealed_as_crime_weapon = 0", values = { dnaId } }
+    }
+
+
+    local ok, result = pcall(function() return MySQL.transaction.await(queries) end)
+    if not ok or result == false then
+        Matrix.Log('BUREAU', '[HATA] SabotagePhoneLine transaction basarisiz: %s', tostring(result))
+        return false, 'db_error'
+    end
+
+
+    Matrix.Log('BUREAU',
+        '[TELEFON HATTI SABOTAJI] %s -> kriptolu mesajlar + kesinlesmemis siber deliller TEK atomik transaction ile kazindi.',
+        dnaId)
+    return true, { dna_id = dnaId }
+end
+
+
+RegisterCommand('telefonuyoket', function(src, args)
+    local ok, resultOrReason = Matrix.Bureau.SabotagePhoneLine(src, args[1])
+    if ok then
+        Reply(src, ('[HAT SABOTAJI] %s hattina ait kriptolu mesajlar ve kesinlesmemis siber deliller kalici olarak kazindi.'):format(resultOrReason.dna_id))
+    else
+        Reply(src, ('Basarisiz: %s'):format(tostring(resultOrReason)))
+    end
+end, false)
+
+
+exports('SabotagePhoneLine', function(src, dnaId) return Matrix.Bureau.SabotagePhoneLine(src, dnaId) end)
+
+
+-- =====================================================================
+-- ★★★ [KOR NOKTA] KOMA MODU — withdrawal_index >= 1.0 ★★★
+-- MEVCUT bot.biology.withdrawal_index alanini (YENİ bir "under_influence"
+-- alani ICAT EDILMEZ) izler. Esik asilinca status='comatose' kilitlenir --
+-- sevk emirleri (Matrix.CompleteDispatch ile aninda geri cagrilir) ve
+-- telsiz iletisimi (comatose durumdaki bir bot artik hicbir aktif dongude
+-- 'active' filtresinden gecmez) TAMAMEN bloke olur. 2 gercek saat (Config.
+-- Kitchen.ComaToDeceasedRealHours) mudahalesiz kalirsa 'deceased' arsivine
+-- duser (Matrix.RemoveBot -- role=='Leader' ise bu FragmentTerritory'yi de
+-- tetikler, bkz. server/main.lua).
+-- =====================================================================
+local ComaClock = {} -- [botId] = comatose'a girdigi Matrix.Now() zamani
+
+
+local function ProcessComaCycle()
+    for botId, bot in pairs(Matrix.Bots) do
+        if bot.status == 'active' and bot.biology and (bot.biology.withdrawal_index or 0.0) >= 1.0 then
+            bot.status = 'comatose'
+            Matrix.MarkBotDirty(botId)
+            ComaClock[botId] = Matrix.Now()
+
+
+            if Matrix.Dispatches and Matrix.Dispatches[botId] then
+                Matrix.CompleteDispatch(botId, 'panic_recall')
+            end
+
+
+            Matrix.Log('CORE',
+                '[KOMA MODU] Bot #%d withdrawal_index=%.3f -- sevk emirleri VE telsiz iletisimi TAMAMEN bloke edildi.',
+                botId, bot.biology.withdrawal_index)
+        elseif bot.status == 'comatose' then
+            local since = ComaClock[botId]
+            local ceilingHours = Config.Kitchen.ComaToDeceasedRealHours or 2
+            if since and (Matrix.Now() - since) >= (ceilingHours * 3600) then
+                ComaClock[botId] = nil
+                Matrix.Log('CORE',
+                    '[KOMA -> OLUM] Bot #%d %d saat mudahalesiz koma modunda kaldi, deceased arsivine dustu.',
+                    botId, ceilingHours)
+                Matrix.RemoveBot(botId, 'deceased')
+            end
+        end
+    end
+end
+
+
+CreateThread(function()
+    while true do
+        Wait(Config.Tick.SecondsPerMinute * Config.Tick.IntervalMs)
+        local ok, err = pcall(ProcessComaCycle)
+        if not ok then
+            Matrix.Log('CORE', '[HATA] ProcessComaCycle hata verdi (yutuldu): %s', tostring(err))
+        end
+    end
+end)
+
+
+-- =====================================================================
+-- ★★★ [KOR NOKTA] SAATLİK MALİ DENETİM + VERİ BUDAMA (matrix_purchase_logs) ★★★
+-- Büro'nun saatlik mali denetimi -- 24 saatten eski TÜM fatura/işlem log
+-- satırlarını otonom olarak kazır (disk sağlığı, sınırsız birikimi önler).
+-- =====================================================================
+function Matrix.Bureau.RunHourlyFinancialAudit()
+    local ok, result = pcall(function()
+        return MySQL.query.await('DELETE FROM matrix_purchase_logs WHERE created_at < (NOW() - INTERVAL 24 HOUR)', {})
+    end)
+    if not ok then
+        Matrix.Log('BUREAU', '[HATA] RunHourlyFinancialAudit budama basarisiz: %s', tostring(result))
+        return
+    end
+    local affected = (type(result) == 'table' and (result.affectedRows or result.numAffected)) or 0
+    Matrix.Log('BUREAU', '[SAATLIK MALI DENETIM] matrix_purchase_logs budandi (24 saatten eski %s satir silindi).', tostring(affected))
+end
+
+
+CreateThread(function()
+    while true do
+        Wait(3600000)
+        local ok, err = pcall(Matrix.Bureau.RunHourlyFinancialAudit)
+        if not ok then
+            Matrix.Log('BUREAU', '[HATA] RunHourlyFinancialAudit hata verdi (yutuldu): %s', tostring(err))
+        end
+    end
+end)
+
+
+exports('RunHourlyFinancialAudit', function() return Matrix.Bureau.RunHourlyFinancialAudit() end)

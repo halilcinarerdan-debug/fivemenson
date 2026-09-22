@@ -603,28 +603,53 @@ function Matrix.Kitchen.PackageBatch(trapHouseId, productItem, packageCount)
     )
 
 
+    -- ★ CRITICAL FIX: her iki RemoveItem de ARTIK yalnizca pcall (hata var
+    -- mi?) degil, GERCEK basari boolean'i (2. donus degeri) ile guard'lanir.
+    -- Onceden bu cagrilar tamamen "ates et ve unut" idi -- ham madde/kesme
+    -- ajani envanterden HIC cikmasa bile paket URETILIYORDU (bedava/dupe
+    -- paket). Simdi tuketim basarisiz olursa islem ANINDA 'return'/'break'
+    -- ile kesilir, AddItem'e ASLA ulasilmaz.
+
     -- Ham maddeyi slot slot (deterministik sıra: en düşük slot numarası önce) tüket.
     table.sort(rawSlots, function(a, b) return a.slot < b.slot end)
     local remainingToConsume = packageCount * rawPerPackage
     for _, entry in ipairs(rawSlots) do
         if remainingToConsume <= 0.0 then break end
         local take = math.min(entry.weight, remainingToConsume)
-        pcall(function()
-            exports['ox_inventory']:RemoveItem(stashId, Config.Kitchen.Packaging.RawItem, take, nil, entry.slot)
+        local rawRemoveOk, rawRemoved = pcall(function()
+            return exports['ox_inventory']:RemoveItem(stashId, Config.Kitchen.Packaging.RawItem, take, nil, entry.slot)
         end)
+        if not (rawRemoveOk and rawRemoved == true) then
+            Matrix.Log('KITCHEN',
+                '[KRITIK] PackageBatch: Trap #%d RawItem (%s) tuketimi basarisiz (slot=%d) -- paket URETILMEDI.',
+                trapHouseId, Config.Kitchen.Packaging.RawItem, entry.slot)
+            return nil, 'raw_consume_failed'
+        end
         remainingToConsume = remainingToConsume - take
+    end
+    if remainingToConsume > 0.0 then
+        Matrix.Log('KITCHEN',
+            '[KRITIK] PackageBatch: Trap #%d RawItem eksik tuketildi (kalan=%.2fg) -- paket URETILMEDI.',
+            trapHouseId, remainingToConsume)
+        return nil, 'raw_consume_incomplete'
     end
 
 
-    pcall(function()
-        exports['ox_inventory']:RemoveItem(stashId, Config.Kitchen.Packaging.CuttingAgentItem, packageCount * cutPerPackage)
+    local cutRemoveOk, cutRemoved = pcall(function()
+        return exports['ox_inventory']:RemoveItem(stashId, Config.Kitchen.Packaging.CuttingAgentItem, packageCount * cutPerPackage)
     end)
+    if not (cutRemoveOk and cutRemoved == true) then
+        Matrix.Log('KITCHEN',
+            '[KRITIK] PackageBatch: Trap #%d CuttingAgentItem (%s) tuketimi basarisiz -- paket URETILMEDI.',
+            trapHouseId, Config.Kitchen.Packaging.CuttingAgentItem)
+        return nil, 'cutting_agent_consume_failed'
+    end
 
 
-    local addOk = pcall(function()
+    local addOk, added = pcall(function()
         return exports['ox_inventory']:AddItem(stashId, productItem, packageCount, { purity = outputPurity })
     end)
-    if not addOk then return nil, 'add_failed' end
+    if not (addOk and added == true) then return nil, 'add_failed' end
 
 
     Matrix.Log('KITCHEN', '[PAKETLEME] Trap #%d: %dx %s (saflik=%.3f) depoya eklendi (ham=%.1fg, kesme=%.1fg tuketildi).',
@@ -809,10 +834,15 @@ local function StealFromTrapStash(theftGrams, trapHouseId)
         if stolen >= theftGrams then break end
         local take = math.min(c.count, theftGrams - stolen)
         if take > 0 then
-            local removeOk = pcall(function()
+            -- ★ CRITICAL FIX: pcall yalnizca Lua hatasi olup olmadigini
+            -- soyler -- RemoveItem'in GERCEK basari boolean'i (2. donus
+            -- degeri) AYRICA katı bir guard olarak kontrol edilmeden
+            -- `stolen` sisirilirse, esya envanterden hic cikmadigi halde
+            -- "calindi" sayilir (sisirilmis stolen degeri).
+            local removeOk, removed = pcall(function()
                 return exports['ox_inventory']:RemoveItem(stashId, c.name, take, nil, c.slot)
             end)
-            if removeOk then stolen = stolen + take end
+            if removeOk and removed == true then stolen = stolen + take end
         end
     end
     return stolen

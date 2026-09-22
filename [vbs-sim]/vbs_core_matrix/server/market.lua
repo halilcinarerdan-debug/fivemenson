@@ -325,20 +325,49 @@ function Matrix.Market.EvaluateSale(zoneId, buyerCitizenid, buyerCognitiveShifte
 end
 
 
+-- ★ CRITICAL FIX: toplu MySQL.transaction.await; RAM bayraklari SADECE
+-- basari sonrasi temizlenir (bkz. server/logistics.lua FlushDirtyFleet ile
+-- AYNI desen).
 local function FlushDirtyMarketZones()
+    local pendingZones = {}
     for zoneId in pairs(dirtyMarketZones) do
+        pendingZones[#pendingZones + 1] = zoneId
+    end
+    if #pendingZones == 0 then return end
+
+
+    local queries = {}
+    for _, zoneId in ipairs(pendingZones) do
         local zone = MarketZones[zoneId]
         if zone then
-            MySQL.prepare([[
-                INSERT INTO matrix_market_zones (zone_id, price_multiplier, rejected_streak, updated_at)
-                VALUES (?, ?, ?, NOW())
-                ON DUPLICATE KEY UPDATE
-                    price_multiplier = VALUES(price_multiplier),
-                    rejected_streak  = VALUES(rejected_streak),
-                    updated_at       = NOW()
-            ]], { zoneId, zone.price_multiplier, zone.rejected_streak })
+            queries[#queries + 1] = {
+                query = [[
+                    INSERT INTO matrix_market_zones (zone_id, price_multiplier, rejected_streak, updated_at)
+                    VALUES (?, ?, ?, NOW())
+                    ON DUPLICATE KEY UPDATE
+                        price_multiplier = VALUES(price_multiplier),
+                        rejected_streak  = VALUES(rejected_streak),
+                        updated_at       = NOW()
+                ]],
+                values = { zoneId, zone.price_multiplier, zone.rejected_streak }
+            }
         end
-        dirtyMarketZones[zoneId] = nil
+    end
+
+
+    if #queries == 0 then
+        for _, zoneId in ipairs(pendingZones) do dirtyMarketZones[zoneId] = nil end
+        return
+    end
+
+
+    local ok, result = pcall(function() return MySQL.transaction.await(queries) end)
+    if ok and result ~= false then
+        for _, zoneId in ipairs(pendingZones) do dirtyMarketZones[zoneId] = nil end
+    else
+        Matrix.Log('MARKET',
+            '[HATA][KRITIK] FlushDirtyMarketZones transaction basarisiz -- dirty bayraklar KORUNDU, tekrar denenecek: %s',
+            tostring(result))
     end
 end
 
@@ -630,20 +659,48 @@ CreateThread(function()
 end)
 
 
+-- ★ CRITICAL FIX: toplu MySQL.transaction.await; RAM bayraklari SADECE
+-- basari sonrasi temizlenir.
 local function FlushDirtyCash()
+    local pendingHouses = {}
     for trapHouseId in pairs(dirtyCash) do
+        pendingHouses[#pendingHouses + 1] = trapHouseId
+    end
+    if #pendingHouses == 0 then return end
+
+
+    local queries = {}
+    for _, trapHouseId in ipairs(pendingHouses) do
         local rec = CashByTrapHouse[trapHouseId]
         if rec then
-            MySQL.prepare([[
-                INSERT INTO matrix_cash_decay (trap_house_id, dirty_amount, deposited_at, updated_at)
-                VALUES (?, ?, FROM_UNIXTIME(?), NOW())
-                ON DUPLICATE KEY UPDATE
-                    dirty_amount = VALUES(dirty_amount),
-                    deposited_at = VALUES(deposited_at),
-                    updated_at   = NOW()
-            ]], { trapHouseId, rec.dirty_amount, rec.deposited_at })
+            queries[#queries + 1] = {
+                query = [[
+                    INSERT INTO matrix_cash_decay (trap_house_id, dirty_amount, deposited_at, updated_at)
+                    VALUES (?, ?, FROM_UNIXTIME(?), NOW())
+                    ON DUPLICATE KEY UPDATE
+                        dirty_amount = VALUES(dirty_amount),
+                        deposited_at = VALUES(deposited_at),
+                        updated_at   = NOW()
+                ]],
+                values = { trapHouseId, rec.dirty_amount, rec.deposited_at }
+            }
         end
-        dirtyCash[trapHouseId] = nil
+    end
+
+
+    if #queries == 0 then
+        for _, trapHouseId in ipairs(pendingHouses) do dirtyCash[trapHouseId] = nil end
+        return
+    end
+
+
+    local ok, result = pcall(function() return MySQL.transaction.await(queries) end)
+    if ok and result ~= false then
+        for _, trapHouseId in ipairs(pendingHouses) do dirtyCash[trapHouseId] = nil end
+    else
+        Matrix.Log('MARKET',
+            '[HATA][KRITIK] FlushDirtyCash transaction basarisiz -- dirty bayraklar KORUNDU, tekrar denenecek: %s',
+            tostring(result))
     end
 end
 
@@ -1127,6 +1184,25 @@ function Matrix.Inspector.ClearMoleFlag(botId)
 end
 
 
+-- ★ [KATMAN 4] Kostebek tespit edilir edilmez, F10/HUD panelini acik tutan
+-- TUM izleyicilere (HudViewers -- Matrix.Hud.PushSnapshots ile AYNI
+-- izleyici kumesi) ANLIK/asenkron bir istihbarat bulteni firlatilir. Ayri
+-- bir CreateThread icinde calisir ki ScanForMoles'in kendi dongusunu
+-- (ve dolayisiyla Config.Inspector.ScanIntervalSeconds periyodunu) ASLA
+-- geciktirmesin veya bir hata durumunda onu COKERTMESIN.
+local function BroadcastMoleBulletin(botId, zoneId, inspectorBotId, snitchTendency)
+    CreateThread(function()
+        local text = ('[KRITIK ANOMALI: HUCRE ICI KOSTEBEK TESPIT EDILDI] Bot #%d (Bolge #%d, Denetleyici Bot #%d) snitch_tendency=%.3f'):format(
+            botId, zoneId, inspectorBotId, snitchTendency)
+        for src in pairs(HudViewers) do
+            pcall(function()
+                TriggerClientEvent('chat:addMessage', src, { args = { '[F10 ISTIHBARAT BULTENI]', text } })
+            end)
+        end
+    end)
+end
+
+
 -- ★ Köstebek tarama: her Inspector, kendi bölgesindeki alt kuryeleri
 -- snitch_tendency eşiğine göre SAF/deterministik olarak tarar. RNG YOK —
 -- aynı psychology.snitch_tendency değeri HER ZAMAN aynı sonucu üretir.
@@ -1148,6 +1224,7 @@ function Matrix.Inspector.ScanForMoles()
                         Matrix.Log('MARKET',
                             '[SIGINT ANOMALISI: KOSTEBEK/MUHBIR DOGRULANDI] Bot #%d (Bolge #%d, Denetleyici Bot #%d) snitch_tendency=%.3f',
                             botId, zoneId, inspectorBotId, bot.psychology.snitch_tendency)
+                        BroadcastMoleBulletin(botId, zoneId, inspectorBotId, bot.psychology.snitch_tendency)
                     end
                 end
             end
@@ -1163,7 +1240,13 @@ end
 
 CreateThread(function()
     while true do
-        Wait(Config.Inspector.ScanIntervalSeconds * 1000)
+        -- ★ [GLOBAL CONVAR] Devriye frekansi Matrix.Bureau.GetBureaucraticVelocity
+        -- (server/bureau.lua, 'matrix_bureau_intensity' ConVar'i) ile CANLI
+        -- olceklenir -- yuklu degilse (savunmacı geri dusus) davranis BIREBIR
+        -- ESKISI GIBIDIR (carpan=1.0).
+        local velocity = (Matrix.Bureau and Matrix.Bureau.GetBureaucraticVelocity and Matrix.Bureau.GetBureaucraticVelocity()) or 1.0
+        if type(velocity) ~= 'number' or velocity <= 0.0 then velocity = 1.0 end
+        Wait((Config.Inspector.ScanIntervalSeconds / velocity) * 1000)
         local ok, err = pcall(Matrix.Inspector.ScanForMoles)
         if not ok then Matrix.Log('MARKET', '[HATA] Inspector.ScanForMoles basarisiz (yutuldu): %s', tostring(err)) end
     end
@@ -1367,24 +1450,52 @@ function Matrix.Market.RecordPriceCrash(zoneId)
 end
 
 
+-- ★ CRITICAL FIX: toplu MySQL.transaction.await; RAM bayraklari SADECE
+-- basari sonrasi temizlenir.
 local function FlushDirtyZoneLedger()
+    local pendingZones = {}
     for zoneId in pairs(dirtyZoneLedger) do
+        pendingZones[#pendingZones + 1] = zoneId
+    end
+    if #pendingZones == 0 then return end
+
+
+    local queries = {}
+    for _, zoneId in ipairs(pendingZones) do
         local ledger = ZoneLedger[zoneId]
         if ledger then
-            MySQL.prepare([[
-                INSERT INTO matrix_zone_ledger
-                    (zone_id, sale_count, total_grams, gross_revenue, net_profit, price_crash_count, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, NOW())
-                ON DUPLICATE KEY UPDATE
-                    sale_count        = VALUES(sale_count),
-                    total_grams       = VALUES(total_grams),
-                    gross_revenue     = VALUES(gross_revenue),
-                    net_profit        = VALUES(net_profit),
-                    price_crash_count = VALUES(price_crash_count),
-                    updated_at        = NOW()
-            ]], { zoneId, ledger.sale_count, ledger.total_grams, ledger.gross_revenue, ledger.net_profit, ledger.price_crash_count })
+            queries[#queries + 1] = {
+                query = [[
+                    INSERT INTO matrix_zone_ledger
+                        (zone_id, sale_count, total_grams, gross_revenue, net_profit, price_crash_count, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, NOW())
+                    ON DUPLICATE KEY UPDATE
+                        sale_count        = VALUES(sale_count),
+                        total_grams       = VALUES(total_grams),
+                        gross_revenue     = VALUES(gross_revenue),
+                        net_profit        = VALUES(net_profit),
+                        price_crash_count = VALUES(price_crash_count),
+                        updated_at        = NOW()
+                ]],
+                values = { zoneId, ledger.sale_count, ledger.total_grams, ledger.gross_revenue, ledger.net_profit, ledger.price_crash_count }
+            }
         end
-        dirtyZoneLedger[zoneId] = nil
+    end
+
+
+    if #queries == 0 then
+        for _, zoneId in ipairs(pendingZones) do dirtyZoneLedger[zoneId] = nil end
+        return
+    end
+
+
+    local ok, result = pcall(function() return MySQL.transaction.await(queries) end)
+    if ok and result ~= false then
+        for _, zoneId in ipairs(pendingZones) do dirtyZoneLedger[zoneId] = nil end
+    else
+        Matrix.Log('MARKET',
+            '[HATA][KRITIK] FlushDirtyZoneLedger transaction basarisiz -- dirty bayraklar KORUNDU, tekrar denenecek: %s',
+            tostring(result))
     end
 end
 
@@ -1619,7 +1730,20 @@ RegisterNetEvent('matrix:server:streetDealing:attemptSale', function()
     end
 
 
-    pcall(function() exports['ox_inventory']:RemoveItem(src, item.name, 1, item.metadata, slot) end)
+    -- ★ CRITICAL FIX: pcall'in GERCEK basari boolean'ini (2. donus degeri)
+    -- kontrol etmeden nakit verilirse, torba oyuncunun cebinden hic
+    -- eksilmeden nakit tekrar tekrar alinabilir (sinirsiz nakit dupe'u).
+    -- Eksilme basarisiz olursa nakit verme islemi ANINDA 'return' ile kesilir.
+    local removeOk, removed = pcall(function()
+        return exports['ox_inventory']:RemoveItem(src, item.name, 1, item.metadata, slot)
+    end)
+    if not (removeOk and removed == true) then
+        TriggerClientEvent('matrix:client:streetDealing:saleResult', src, false, nil, false)
+        Matrix.Log('MARKET',
+            '[KRITIK] attemptSale: %s icin %s envanterden cikarilamadi -- nakit VERILMEDI.',
+            citizenid, tostring(item.name))
+        return
+    end
 
 
     local ok, player = pcall(function() return Matrix.QBX:GetPlayer(src) end)
@@ -1713,9 +1837,19 @@ local function ResolveBotStreetSale(botId, bot)
     end
 
 
-    pcall(function()
-        exports['ox_inventory']:RemoveItem(inventoryId, chosenItem.name, 1, chosenItem.metadata, chosenSlot)
+    -- ★ CRITICAL FIX: RemoveItem'in GERCEK basari boolean'i kontrol edilmeden
+    -- BotStreetCash sisirilirse, bot envanterinden urun hic eksilmeden
+    -- sinirsiz nakit birikimi mumkun olurdu. Basarisiz olursa 'return' ile
+    -- ANINDA kesilir.
+    local removeOk, removed = pcall(function()
+        return exports['ox_inventory']:RemoveItem(inventoryId, chosenItem.name, 1, chosenItem.metadata, chosenSlot)
     end)
+    if not (removeOk and removed == true) then
+        Matrix.Log('MARKET',
+            '[KRITIK] ResolveBotStreetSale: Bot #%d icin %s envanterden cikarilamadi -- nakit BIRIKTIRILMEDI.',
+            botId, tostring(chosenItem.name))
+        return
+    end
 
 
     BotStreetCash[botId] = (BotStreetCash[botId] or 0.0) + cash

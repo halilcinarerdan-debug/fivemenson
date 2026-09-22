@@ -204,7 +204,18 @@ local RequiredHooks = {
     { 'Matrix.Forensics.InspectPlayer',        Matrix.Forensics and Matrix.Forensics.InspectPlayer },
     { 'Matrix.Forensics.InspectBustedBot',     Matrix.Forensics and Matrix.Forensics.InspectBustedBot },
     { 'Matrix.Kitchen.ProcessCook',            Matrix.Kitchen and Matrix.Kitchen.ProcessCook },
-    { 'Matrix.Kitchen.GetEffectiveSkill',      Matrix.Kitchen and Matrix.Kitchen.GetEffectiveSkill }
+    { 'Matrix.Kitchen.GetEffectiveSkill',      Matrix.Kitchen and Matrix.Kitchen.GetEffectiveSkill },
+
+    -- ★ Bu oturumda eklenen kancalar -- kanca kaymasini (sessizce yok olmasini) yakalar.
+    { 'Matrix.Bureau.GetBureaucraticVelocity', Matrix.Bureau and Matrix.Bureau.GetBureaucraticVelocity },
+    { 'Matrix.Bureau.OpenTrial',               Matrix.Bureau and Matrix.Bureau.OpenTrial },
+    { 'Matrix.Bureau.RecordTrialResponse',     Matrix.Bureau and Matrix.Bureau.RecordTrialResponse },
+    { 'Matrix.Bureau.ExecuteVerdict',          Matrix.Bureau and Matrix.Bureau.ExecuteVerdict },
+    { 'Matrix.Bureau.SabotagePhoneLine',       Matrix.Bureau and Matrix.Bureau.SabotagePhoneLine },
+    { 'Matrix.Bureau.RunHourlyFinancialAudit', Matrix.Bureau and Matrix.Bureau.RunHourlyFinancialAudit },
+    { 'Matrix.Forensics.SanitizeCCTVTrail',    Matrix.Forensics and Matrix.Forensics.SanitizeCCTVTrail },
+    { 'Matrix.DistrictHubs.FragmentTerritory', Matrix.DistrictHubs and Matrix.DistrictHubs.FragmentTerritory },
+    { 'Matrix.DepositDealerCargoToTrapStash',  Matrix.DepositDealerCargoToTrapStash }
 }
 
 for _, entry in ipairs(RequiredHooks) do
@@ -243,7 +254,40 @@ local DbChecks = {
         return ColumnExists('matrix_bots', 'loyalty_base'), 'sql/layer7_faz3.sql calistirildi mi?'
     end },
     { 'matrix_bureau_learning_core tablosu mevcut', function() return TableExists('matrix_bureau_learning_core'), 'sql/layer7_faz1.sql' end },
-    { 'matrix_district_hubs tablosu mevcut', function() return TableExists('matrix_district_hubs'), 'sql/layer7_faz1.sql' end }
+    { 'matrix_district_hubs tablosu mevcut', function() return TableExists('matrix_district_hubs'), 'sql/layer7_faz1.sql' end },
+
+    -- =================================================================
+    -- ★ REGRESYON: 9 GERI ENJEKTE EDILEN HAYATI DB KONTROLU (HIGH)
+    -- sql/layer_regression_schema.sql calistirilmadan bu 9 kontrol
+    -- BASARISIZ doner -- muhurleme barajini kasitli olarak yukari tirmandirir.
+    -- =================================================================
+    { 'matrix_zone_ledger.dirty_cash_pool kolonu mevcut', function()
+        return ColumnExists('matrix_zone_ledger', 'dirty_cash_pool'), 'sql/layer_regression_schema.sql calistirildi mi?'
+    end },
+    { 'matrix_bots.accounting_precision kolonu mevcut', function()
+        return ColumnExists('matrix_bots', 'accounting_precision'), 'sql/layer_regression_schema.sql calistirildi mi?'
+    end },
+    { 'matrix_zone_inspectors.is_wiped kolonu mevcut', function()
+        return ColumnExists('matrix_zone_inspectors', 'is_wiped'), 'sql/layer_regression_schema.sql calistirildi mi?'
+    end },
+    { 'matrix_purchase_logs tablosu mevcut', function()
+        return TableExists('matrix_purchase_logs'), 'sql/layer_regression_schema.sql calistirildi mi?'
+    end },
+    { 'matrix_customer_pool.is_dead kolonu mevcut', function()
+        return ColumnExists('matrix_customer_pool', 'is_dead'), 'sql/layer_regression_schema.sql calistirildi mi?'
+    end },
+    { 'matrix_gang_learning_core tablosu mevcut', function()
+        return TableExists('matrix_gang_learning_core'), 'sql/layer_regression_schema.sql calistirildi mi?'
+    end },
+    { 'matrix_trial_records tablosu mevcut', function()
+        return TableExists('matrix_trial_records'), 'sql/layer_regression_schema.sql calistirildi mi?'
+    end },
+    { 'matrix_player_state.imprisoned kolonu mevcut', function()
+        return ColumnExists('matrix_player_state', 'imprisoned'), 'sql/layer_regression_schema.sql calistirildi mi?'
+    end },
+    { 'matrix_legal_plate_evidence tablosu mevcut (KATMAN 14)', function()
+        return TableExists('matrix_legal_plate_evidence'), 'sql/layer_regression_schema.sql calistirildi mi?'
+    end }
 }
 
 -- ---------------------------------------------------------------------

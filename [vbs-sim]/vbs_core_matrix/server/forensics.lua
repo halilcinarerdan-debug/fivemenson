@@ -1621,6 +1621,97 @@ end
 
 
 -- =====================================================================
+-- [KAMERA VERI TEMIZLIGI] /kameralogutemizle -- oyuncu bir router kutusuna
+-- (Config.TrapHouseInterior.Shell.RouterPos) fiziksel olarak yaklastiginda,
+-- KENDI dna_id'sine ait son 30 dakikalik TUM matrix_cctv_logs satirlari
+-- (mobese gecis hash kayitlari + kiyafet kombinasyon izleri) kalici olarak
+-- DB'den kazinir -- HackCCTVNetwork (yukarida, zone-bazli) ILE AYNI
+-- tabloyu kullanir, YENİ bir tablo İCAT EDİLMEZ.
+-- =====================================================================
+local function VerifyAtRouter(src)
+    if not (Matrix.TrapHouseInterior and Matrix.TrapHouseInterior.GetPlayerTrapHouse) then
+        return true
+    end
+
+
+    local trapHouseId = Matrix.TrapHouseInterior.GetPlayerTrapHouse(src)
+    if not trapHouseId then return false end
+
+
+    local shell = Config.TrapHouseInterior and Config.TrapHouseInterior.Shell
+    local routerPos = shell and shell.RouterPos
+    if not routerPos then return true end
+
+
+    local ped = GetPlayerPed(src)
+    if not ped or ped == 0 then return false end
+    local coords = GetEntityCoords(ped)
+    local radius = (Config.Forensics.RouterSanitization and Config.Forensics.RouterSanitization.Radius) or 2.0
+    return #(coords - routerPos) <= radius
+end
+
+
+function Matrix.Forensics.SanitizeCCTVTrail(src)
+    if type(src) ~= 'number' or src <= 0 then return false, 'bad_src' end
+
+
+    if not VerifyAtRouter(src) then
+        return false, 'not_at_router'
+    end
+
+
+    local state = Matrix.GetOrCreatePlayerState(src)
+    if not state or not state.dna_id then return false, 'state_unresolved' end
+
+
+    local windowMinutes = (Config.Forensics.RouterSanitization and Config.Forensics.RouterSanitization.WindowMinutes) or 30
+
+
+    -- ★ windowMinutes Config'ten gelir (kullanici girdisi DEGILDIR) --
+    -- HackCCTVNetwork'un (yukarida) AYNI "INTERVAL sabiti sorgu icine
+    -- gomulur" konvansiyonuyla tutarli (bazi surucularin INTERVAL
+    -- konumunda parametre bind'ini desteklememesi riskine karsi).
+    local ok, result = pcall(function()
+        return MySQL.query.await(
+            ('DELETE FROM matrix_cctv_logs WHERE dna_id = ? AND created_at >= (NOW() - INTERVAL %d MINUTE)'):format(windowMinutes),
+            { state.dna_id }
+        )
+    end)
+    if not ok then
+        Matrix.Log('FORENSICS', '[HATA] SanitizeCCTVTrail DELETE basarisiz: %s', tostring(result))
+        return false, 'db_error'
+    end
+
+
+    local affected = (type(result) == 'table' and (result.affectedRows or result.numAffected)) or 0
+    Matrix.Log('FORENSICS',
+        '[KAMERA VERI TEMIZLIGI] %s -> router kutusu uzerinden son %d dakikalik mobese/kiyafet izi kazindi (%s satir).',
+        state.dna_id, windowMinutes, tostring(affected))
+
+
+    return true, { minutes = windowMinutes, affected = affected }
+end
+
+
+RegisterCommand('kameralogutemizle', function(src, args)
+    if type(src) ~= 'number' or src <= 0 then return end
+
+
+    local ok, resultOrReason = Matrix.Forensics.SanitizeCCTVTrail(src)
+    if ok then
+        Reply(src, ('[ROUTER SIZMASI] Son %d dakikalik mobese/kiyafet izi kalici olarak kazindi.'):format(resultOrReason.minutes))
+    elseif resultOrReason == 'not_at_router' then
+        Reply(src, 'Router kutusunun yaninda degilsiniz (bir trap house icine girip router\'a yaklasin).')
+    else
+        Reply(src, ('Basarisiz: %s'):format(tostring(resultOrReason)))
+    end
+end, false)
+
+
+exports('SanitizeCCTVTrail', function(src) return Matrix.Forensics.SanitizeCCTVTrail(src) end)
+
+
+-- =====================================================================
 -- [OPSEC-5c] KANIT ODASI SABOTAJI — server/bureau.lua Matrix.Bureau.
 -- ProcessBribeOffer'ın (DEĞİŞTİRİLMEDİ, yalnızca opsiyonel bir 4. caseId
 -- parametresi eklendi) BAŞARILI sonucuyla konuşan mekanizma. caseId,

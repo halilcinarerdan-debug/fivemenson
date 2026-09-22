@@ -189,6 +189,92 @@ lib.callback.register('matrix:callback:getDistrictHubsReport', function(src)
 end)
 
 -- =====================================================================
+-- ★ [OTONOM ALT HUCRE BOLUNMESI] FragmentTerritory (SLIME MODEL)
+-- Bir otonom cete lideri (bot.role=='Leader') 'deceased' olarak dustugunde
+-- (bkz. server/main.lua Matrix.RemoveBot -> TriggerEvent
+-- 'matrix:internal:gangLeaderDeceased') o trap house'a bagli TUM Toplu
+-- Satis Hub'lari parcalanir. 0-RNG formul: trapHouseId CIFT ise 2, TEK ise
+-- 3 Alt Hucre (Splinter Cell) uretilir. Her Alt Hucre, MEVCUT
+-- ProcessHubDemandCycle toplu-satis motoruna (asagida) EK olarak periyodik
+-- agresif pusu (server/rendezvous.lua'nin AYNI 'matrix:client:rendezvous:
+-- triggerAmbush' event'i + Config.Rendezvous parametreleri) ve siber
+-- mesaj sizintisi (server/bureau.lua'nin AYNI Matrix.Bureau.
+-- TriggerPropaganda formulu) uretir -- yeni bir paralel ekonomi/formul
+-- ICAT EDILMEZ, mevcut motorlar yeniden kullanilir.
+-- =====================================================================
+local SplinterCells = {} -- [id] = { id, parent_hub_id, trap_house_id, splinter_index, coords, active }
+local nextSplinterId = 1
+
+local function PersistSplinterCell(cell)
+    MySQL.insert([[
+        INSERT INTO matrix_splinter_cells
+            (parent_hub_id, trap_house_id, splinter_index, coord_x, coord_y, coord_z, active, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, NOW())
+    ]], {
+        cell.parent_hub_id, cell.trap_house_id, cell.splinter_index,
+        cell.coords.x, cell.coords.y, cell.coords.z, cell.active and 1 or 0
+    }, function(insertId)
+        if insertId then cell.db_id = insertId end
+    end)
+end
+
+function Matrix.DistrictHubs.FragmentTerritory(trapHouseId, deadLeaderBotId)
+    trapHouseId = tonumber(trapHouseId)
+    if not trapHouseId then return false, 'bad_trap_house' end
+
+    -- 0-RNG formul: cift trapHouseId -> 2 Alt Hucre, tek -> 3 Alt Hucre.
+    local splinterCount = (trapHouseId % 2 == 0) and 2 or 3
+
+    local fragmentedHubs = 0
+    for hubId, hub in pairs(Hubs) do
+        if hub.trap_house_id == trapHouseId and hub.active then
+            hub.active = false
+            dirtyHubs[hubId] = true
+            fragmentedHubs = fragmentedHubs + 1
+
+            for i = 1, splinterCount do
+                local cell = {
+                    id             = nextSplinterId,
+                    parent_hub_id  = hubId,
+                    trap_house_id  = trapHouseId,
+                    splinter_index = i,
+                    coords         = hub.coords,
+                    active         = true
+                }
+                nextSplinterId = nextSplinterId + 1
+                SplinterCells[cell.id] = cell
+                PersistSplinterCell(cell)
+            end
+        end
+    end
+
+    Matrix.Log('DISTRICT_HUB',
+        '[FRAGMENTATION] Cete lideri Bot #%s dustu (Trap #%d) -- %d hub parcalandi, %dx Alt Hucre (Splinter Cell) uretildi (0-RNG: %s).',
+        tostring(deadLeaderBotId), trapHouseId, fragmentedHubs, fragmentedHubs * splinterCount,
+        (trapHouseId % 2 == 0) and 'cift->2' or 'tek->3')
+
+    -- ★ [KATMAN 7 REGRESYON] Her bolunme matrix_gang_learning_core'a bir
+    -- ogrenme kaydi isler -- FragmentTerritory'nin ne kadar sik/agresif
+    -- tetiklendiginin kalici izi (aggression_level = uretilen toplam Alt
+    -- Hucre sayisi, RNG YOK -- salt bir sayac).
+    pcall(function()
+        MySQL.insert([[
+            INSERT INTO matrix_gang_learning_core (trap_house_id, splinter_count, aggression_level, updated_at)
+            VALUES (?, ?, ?, NOW())
+        ]], { trapHouseId, splinterCount, fragmentedHubs * splinterCount })
+    end)
+
+    return true, fragmentedHubs, splinterCount
+end
+
+AddEventHandler('matrix:internal:gangLeaderDeceased', function(trapHouseId, deadLeaderBotId)
+    local ok, err = pcall(Matrix.DistrictHubs.FragmentTerritory, trapHouseId, deadLeaderBotId)
+    if not ok then
+        Matrix.Log('DISTRICT_HUB', '[HATA] FragmentTerritory basarisiz (yutuldu): %s', tostring(err))
+    end
+end)
+
+-- =====================================================================
 -- BÜRO KİLİDİ DİNLEYİCİSİ (raidIssued/raidResolved İLE AYNI pasif desen)
 -- =====================================================================
 AddEventHandler('matrix:internal:bureauLockdown', function(trapHouseId, active)
@@ -223,10 +309,13 @@ local function ProcessHubDemandCycle(hubId, hub)
 
     for _, item in pairs(inv.items) do
         if type(item) == 'table' and type(item.name) == 'string' and (tonumber(item.count) or 0) >= batchGrams then
-            local removeOk = pcall(function()
+            -- ★ CRITICAL FIX: RemoveItem'in GERCEK basari boolean'i (2. donus
+            -- degeri) kontrol edilmeden kirli nakit yatirilirsa, depodan
+            -- urun hic eksilmeden sinirsiz nakit uretilebilirdi.
+            local removeOk, removed = pcall(function()
                 return exports['ox_inventory']:RemoveItem(stashId, item.name, batchGrams, item.metadata)
             end)
-            if removeOk then
+            if removeOk and removed == true then
                 local proceeds = batchGrams * (Config.Market.StreetBasePricePerGram or 20.0)
                 Matrix.CashDecay.Deposit(hub.trap_house_id, proceeds)
                 Matrix.Log('DISTRICT_HUB', 'Hub #%d (trap #%d, %s) toplu satis: %s x%d, ciro=%.1f (kirli nakite eklendi).',
@@ -244,6 +333,64 @@ CreateThread(function()
             local ok, err = pcall(ProcessHubDemandCycle, hubId, hub)
             if not ok then
                 Matrix.Log('DISTRICT_HUB', '[HATA] ProcessHubDemandCycle #%d hata verdi (yutuldu): %s', hubId, tostring(err))
+            end
+        end
+    end
+end)
+
+-- ★ Alt Hucre (Splinter Cell) dongusu: MEVCUT ProcessHubDemandCycle ILE
+-- AYNI periyotta (Config.DistrictHubs.DemandCycleSeconds) calisir, ama
+-- normal hub'lardan farkli olarak HER turda ek olarak (a) trap house'un
+-- en yakinindaki oyunculara agresif pusu sizdirir VE (b) Buro'nun siber
+-- sizinti/propaganda formulunu ilerletir.
+local function ProcessSplinterCellCycle(cellId, cell)
+    if not cell.active then return end
+
+    -- (a) AGRESIF PUSU: server/rendezvous.lua'nin AYNI client event'i +
+    -- AYNI Config.Rendezvous ambush parametreleri, tum online oyunculardan
+    -- Alt Hucre'nin AmbushAggroRadius'u icindekilere sizdirilir.
+    local players = GetPlayers and GetPlayers() or {}
+    for _, playerIdStr in ipairs(players) do
+        local targetSrc = tonumber(playerIdStr)
+        if targetSrc then
+            local ped = GetPlayerPed(targetSrc)
+            if ped and ped ~= 0 then
+                local okCoords, coords = pcall(GetEntityCoords, ped)
+                if okCoords and coords and #(coords - cell.coords) <= (Config.Rendezvous.AmbushAggroRadius or 60.0) then
+                    TriggerClientEvent('matrix:client:rendezvous:triggerAmbush', targetSrc, {
+                        coords       = cell.coords,
+                        ped_model    = Config.Rendezvous.AmbushPedModel,
+                        weapon       = Config.Rendezvous.AmbushWeapon,
+                        squad_size   = Config.Rendezvous.AmbushSquadSize,
+                        spawn_radius = Config.Rendezvous.AmbushSpawnRadius,
+                        aggro_radius = Config.Rendezvous.AmbushAggroRadius
+                    })
+                    Matrix.Log('DISTRICT_HUB',
+                        '[ALT HUCRE PUSUSU] Splinter Cell #%d (trap #%d) -> oyuncu src=%d icin pusu sizdirildi.',
+                        cellId, cell.trap_house_id, targetSrc)
+                end
+            end
+        end
+    end
+
+    -- (b) SIBER MESAJ SIZINTISI: MEVCUT Matrix.Bureau.TriggerPropaganda
+    -- formulu (propagandaMomentum + cyberLeakHeatmap) yeniden kullanilir.
+    if Matrix.Bureau and Matrix.Bureau.TriggerPropaganda then
+        pcall(Matrix.Bureau.TriggerPropaganda, cell.trap_house_id)
+    end
+
+    -- Toplu satis motoru: Alt Hucre de ayni depo-tuketim mantigini
+    -- (ProcessHubDemandCycle'in AYNISI) kullanir -- yeni bir hub kaydi gibi davranir.
+    ProcessHubDemandCycle(cellId, { active = true, locked = false, trap_house_id = cell.trap_house_id, label = ('Alt Hucre #%d'):format(cellId) })
+end
+
+CreateThread(function()
+    while true do
+        Wait((Config.DistrictHubs.DemandCycleSeconds or 45) * 1000)
+        for cellId, cell in pairs(SplinterCells) do
+            local ok, err = pcall(ProcessSplinterCellCycle, cellId, cell)
+            if not ok then
+                Matrix.Log('DISTRICT_HUB', '[HATA] ProcessSplinterCellCycle #%d hata verdi (yutuldu): %s', cellId, tostring(err))
             end
         end
     end
