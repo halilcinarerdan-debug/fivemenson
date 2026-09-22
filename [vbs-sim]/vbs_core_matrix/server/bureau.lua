@@ -1150,8 +1150,8 @@ end
 -- ★ pcall'lı: MySQL.insert (veya IsValidCoords dışında herhangi bir şey)
 -- beklenmedik şekilde hata verirse artık SESSİZCE yutulmuyor — chat'e
 -- açık bir hata mesajı basılır VE server konsoluna loglanır. Önceki hâl
--- CreateTrapHouse'u pcall'sız çağırıyordu; bir DB hatası (örn. matrix.sql
--- hiç import edilmemişse tablo yok) komutun geri kalanını sessizce
+-- CreateTrapHouse'u pcall'sız çağırıyordu; bir DB hatası (örn. sql/
+-- matrix_financial_core.sql hiç import edilmemişse tablo yok) komutun geri kalanını sessizce
 -- durdurup oyuncuya HİÇBİR mesaj göstermeyebiliyordu.
 RegisterCommand('traphouseekle', function(src, args)
     local label = args[1]

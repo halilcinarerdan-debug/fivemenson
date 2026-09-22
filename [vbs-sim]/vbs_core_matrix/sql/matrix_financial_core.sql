@@ -1,4 +1,30 @@
 -- =====================================================================
+-- ★★★ MATRIX FINANCIAL CORE — TEK DOSYA KONSOLIDASYON MUHURU ★★★
+-- sql/matrix_financial_core.sql
+--
+-- Bu dosya, projenin daha once 7 ayri dosyaya (matrix.sql,
+-- layer5_ultimate.sql, layer6_trap_house.sql, layer7_faz1.sql,
+-- layer7_faz3.sql, matrix_security_hardening.sql, matrix_cctv_network.sql)
+-- dagilmis TUM sema gecmisinin, TEK BIR SATIR BILE ATLANMADAN, her
+-- dosyanin KENDI ic yorumlarinda belirttigi bagimlilik zincirini
+-- bozmayacak sirayla (temel sema -> katman 5 -> katman 6 -> katman 7
+-- faz 1 -> katman 7 faz 3 -> guvenlik sertlestirme -> CCTV agi)
+-- BIRLESTIRILMIS HALIDIR. Her bolum, hangi eski dosyadan geldigini
+-- gosteren bir "★ KAYNAK" basligiyla ayrilmistir (bu basliklar YENI
+-- eklenen organizasyonel isaretlerdir, orijinal icerikten HICBIR SEY
+-- CIKARILMAMISTIR/DEGISTIRILMEMISTIR).
+--
+-- CALISTIRMA: bu TEK dosyayi, dogrudan (bastan sona) sirayla import edin.
+-- Ayri ayri calistirma adimi ARTIK YOKTUR.
+-- =====================================================================
+
+
+
+-- =======================================================================
+-- ★ KAYNAK: sql/matrix.sql (orijinal icerik, birebir asagida, hicbir satir atlanmadi)
+-- =======================================================================
+
+-- =====================================================================
 -- MATRIX SCHEMA v3 — Katman 5 (Qbox Co-op Kartel Hiyerarşisi & Piyasa)
 -- Katman 1-2-3-4-5 Birlesik Motor - Kalici Veri Tabani
 --
@@ -519,3 +545,443 @@ SET FOREIGN_KEY_CHECKS = 1;
 -- DROP TABLE IF EXISTS `matrix_player_state`;
 -- DROP TABLE IF EXISTS `matrix_bots`;
 -- SET FOREIGN_KEY_CHECKS = 1;
+
+
+-- =======================================================================
+-- ★ KAYNAK: sql/layer5_ultimate.sql (orijinal icerik, birebir asagida, hicbir satir atlanmadi)
+-- =======================================================================
+
+-- =====================================================================
+-- MATRIX SCHEMA — KATMAN 5 ULTIMATE EK MİGRASYONU (sql/layer5_ultimate.sql)
+-- Co-Op & SIGINT/COMINT Bali-Logistics Matrix
+--
+-- ★ BU DOSYA TAMAMEN EKLEMELİDİR (ADDITIVE-ONLY):
+--   matrix.sql'deki (v3) 16 tabloya HİÇBİRİNE DOKUNULMAZ — ALTER YOK,
+--   DROP YOK, kolon eklenmedi. Yalnızca 4 YENİ tablo eklenir. matrix.sql'i
+--   İMPORT ETTİKTEN SONRA bu dosyayı çalıştırın.
+--
+--   Bu dosya, matrix.sql ile AYNI konvansiyonları izler:
+--     - ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+--     - "DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP" KULLANILMAZ
+--       (bazı MariaDB/MySQL derlemelerinde CREATE TABLE'ı sessizce
+--       başarısız kılıyordu — v1→v2 notu, bkz. matrix.sql). `updated_at`/
+--       `flagged_at`/`assigned_at` uygulama katmanında (server/market.lua,
+--       server/blackmarket.lua) her UPSERT'te explicit NOW() ile yazılır.
+--     - Tablo/kolon adları geriye dönük `matrix_` önekini korur.
+--
+--   ★ KASITLI TASARIM KARARI — FK YOK: `matrix_zone_inspectors.bot_id` ve
+--     `matrix_mole_flags.bot_id`, KASITLI OLARAK `matrix_bots.id`'ye FOREIGN
+--     KEY İLE BAĞLANMAZ. Sebep: server/logistics.lua'nın Matrix.Logistics.
+--     OnDealerEliminated'i (F10 "Operatif Tasfiye Et" -> /operatiftasfiye,
+--     bkz. server/main.lua) matrix_bots satırını GERÇEK bir DELETE ile
+--     kalıcı olarak siler (hard-delete politikası, matrix.sql başlığında
+--     zaten tanımlı). Bir Inspector'a atanmış veya köstebek olarak
+--     işaretlenmiş bir botu tasfiye etmek İSTİSNASIZ ÇALIŞMALIDIR — bir FK
+--     kısıtı (varsayılan RESTRICT/NO ACTION) bu hard-delete'i SESSİZCE
+--     BLOKE ederdi. RAM tarafında (server/market.lua Matrix.Inspector)
+--     zaten stale bot_id'lere karşı dayanıklı: silinen bir bot bir
+--     sonraki taramada otomatik olarak atamadan düşer (self-healing).
+-- =====================================================================
+
+
+SET FOREIGN_KEY_CHECKS = 0;
+
+
+-- ---------------------------------------------------------------------
+-- [U2] Karaborsa Ticaret Ağı - satın alma günlüğü (asla silinmez; mevcut
+-- "adli kayıt politikası" ruhuna uygun kalıcı bir kâğıt izi).
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `matrix_blackmarket_purchases` (
+    `id`          INT          NOT NULL AUTO_INCREMENT,
+    `citizenid`   VARCHAR(50)  NOT NULL,
+    `item_type`   ENUM('vehicle','weapon','barrel','burner_phone') NOT NULL,
+    `item_ref`    VARCHAR(64)  NOT NULL,
+    `price_paid`  FLOAT        NOT NULL DEFAULT 0.0,
+    `created_at`  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    KEY `idx_matrix_blackmarket_purchases_citizenid` (`citizenid`)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
+
+
+-- ---------------------------------------------------------------------
+-- [U4] SIGINT - Bölge Denetleyicisi (Inspector) ataması. Bölge başına
+-- TEK aktif denetleyici (PRIMARY KEY = zone_id); yeniden atama UPSERT ile
+-- öncekinin yerini alır.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `matrix_zone_inspectors` (
+    `zone_id`                INT         NOT NULL,
+    `bot_id`                 INT         NOT NULL,
+    `assigned_by_citizenid`  VARCHAR(50) NULL,
+    `assigned_at`            DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (`zone_id`)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
+
+
+-- ---------------------------------------------------------------------
+-- [U4] SIGINT - Köstebek/muhbir tarama sonucu kalıcı bülteni. Bir botun
+-- Operatif Tasfiye Et ile arındırılmasından SONRA da (kanıt/denetim amaçlı)
+-- kalır; matrix_bots.id hard-delete sonrası hiçbir zaman yeniden
+-- kullanılmaz (Matrix.NextBotId monoton artar), bu yüzden stale satır bir
+-- sonraki bot ile ASLA çakışmaz.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `matrix_mole_flags` (
+    `bot_id`           INT      NOT NULL,
+    `snitch_tendency`  FLOAT    NOT NULL DEFAULT 0.0,
+    `flagged_at`       DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (`bot_id`)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
+
+
+-- ---------------------------------------------------------------------
+-- [U6] Bölgesel Mali Rapor - bölge başına yuvarlanan (rolling) kâr/zarar
+-- bilançosu. matrix_market_zones (fiyat çarpanı/ardarda-red) ile AYNI
+-- zone_id uzayını paylaşır ama BAĞIMSIZ bir tablodur (o da zone_id'ye FK
+-- taşımıyor — zone'lar Config.Market.Zones'ta statik tanımlı, ayrı bir
+-- "zones" ebeveyn tablosu hiç var olmadı).
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `matrix_zone_ledger` (
+    `zone_id`            INT      NOT NULL,
+    `sale_count`         INT      NOT NULL DEFAULT 0,
+    `total_grams`        FLOAT    NOT NULL DEFAULT 0.0,
+    `gross_revenue`      FLOAT    NOT NULL DEFAULT 0.0,
+    `net_profit`         FLOAT    NOT NULL DEFAULT 0.0,
+    `price_crash_count`  INT      NOT NULL DEFAULT 0,
+    `updated_at`         DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (`zone_id`)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
+
+
+SET FOREIGN_KEY_CHECKS = 1;
+
+
+-- =====================================================================
+-- DOĞRULAMA SORGUSU (opsiyonel — bu dosya çalıştırıldıktan sonra 4 dönmeli)
+-- =====================================================================
+-- SELECT COUNT(*) AS layer5_ultimate_table_count
+-- FROM information_schema.tables
+-- WHERE table_schema = DATABASE()
+--   AND table_name IN (
+--       'matrix_blackmarket_purchases',
+--       'matrix_zone_inspectors',
+--       'matrix_mole_flags',
+--       'matrix_zone_ledger'
+--   );
+
+
+-- =====================================================================
+-- BAKIM: Yalnızca bu migrasyonun eklediği 4 tabloyu geri almak isterseniz
+-- (matrix.sql'in 16 tablosuna DOKUNMAZ). Yorumdan çıkarıp çalıştırın.
+-- =====================================================================
+-- SET FOREIGN_KEY_CHECKS = 0;
+-- DROP TABLE IF EXISTS `matrix_zone_ledger`;
+-- DROP TABLE IF EXISTS `matrix_mole_flags`;
+-- DROP TABLE IF EXISTS `matrix_zone_inspectors`;
+-- DROP TABLE IF EXISTS `matrix_blackmarket_purchases`;
+-- SET FOREIGN_KEY_CHECKS = 1;
+
+
+-- =======================================================================
+-- ★ KAYNAK: sql/layer6_trap_house.sql (orijinal icerik, birebir asagida, hicbir satir atlanmadi)
+-- =======================================================================
+
+-- =====================================================================
+-- MATRIX SCHEMA — KATMAN 6 EK MİGRASYONU (sql/layer6_trap_house.sql)
+-- Siber-Taktik Operasyon ve Stratejik Trap House Mimarisi
+--
+-- ★ BU DOSYA TAMAMEN EKLEMELİDİR (ADDITIVE-ONLY):
+--   matrix.sql (v3, 22 tablo) ve sql/layer5_ultimate.sql (4 tablo)
+--   HİÇBİR ŞEKİLDE değiştirilmez — ALTER YOK, DROP YOK, kolon eklenmedi.
+--   Yalnızca 3 YENİ tablo eklenir. matrix.sql VE layer5_ultimate.sql'i
+--   İMPORT ETTİKTEN SONRA bu dosyayı çalıştırın.
+--
+--   Aynı konvansiyonlar korunur: ENGINE=InnoDB DEFAULT CHARSET=utf8mb4,
+--   "ON UPDATE CURRENT_TIMESTAMP" KULLANILMAZ (uygulama katmanı NOW() ile
+--   yazar), `matrix_` öneki korunur, FK'ler yalnızca gerçekten var olan
+--   kalıcı ebeveyn tablolara (matrix_trap_houses) bağlanır.
+-- =====================================================================
+
+
+SET FOREIGN_KEY_CHECKS = 0;
+
+
+-- ---------------------------------------------------------------------
+-- [K6-4] Kapı Sürgü Tahkimatı — trap house başına TEK aktif seviye
+-- (0-3). server/door_reinforcement.lua tarafından okunur/yazılır.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `matrix_door_reinforcement` (
+    `trap_house_id` INT      NOT NULL,
+    `level`         TINYINT  NOT NULL DEFAULT 0,
+    `installed_by_citizenid` VARCHAR(50) NULL,
+    `updated_at`    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (`trap_house_id`),
+    CONSTRAINT `fk_matrix_door_reinforcement_trap_house`
+        FOREIGN KEY (`trap_house_id`) REFERENCES `matrix_trap_houses` (`id`)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
+
+
+-- ---------------------------------------------------------------------
+-- [K6-1] Rendezvous / Dead Drop teslimatı adli kaydı — asla silinmez
+-- (mevcut "adli kayıt politikası" ile aynı ruh: bir pusu/teslimatın
+-- gerçekten olup olmadığı sonradan denetlenebilir kalır).
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `matrix_rendezvous_events` (
+    `id`               INT          NOT NULL AUTO_INCREMENT,
+    `citizenid`        VARCHAR(50)  NOT NULL,
+    `catalog_type`     ENUM('weapon','ammo') NOT NULL,
+    `catalog_id`       VARCHAR(64)  NOT NULL,
+    `handoff_x`        FLOAT        NOT NULL DEFAULT 0.0,
+    `handoff_y`        FLOAT        NOT NULL DEFAULT 0.0,
+    `handoff_z`        FLOAT        NOT NULL DEFAULT 0.0,
+    `trace_level_at_handoff` FLOAT  NOT NULL DEFAULT 0.0,
+    `ambush_triggered` TINYINT(1)   NOT NULL DEFAULT 0,
+    `outcome`          ENUM('pending','delivered','expired') NOT NULL DEFAULT 'pending',
+    `created_at`       DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `resolved_at`      DATETIME     NULL,
+    PRIMARY KEY (`id`),
+    KEY `idx_matrix_rendezvous_events_citizenid` (`citizenid`)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
+
+
+-- ---------------------------------------------------------------------
+-- [K6-3] Paketleme Odası çalışma durumu — trap house başına TEK kayıt.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `matrix_packaging_room_state` (
+    `trap_house_id` INT      NOT NULL,
+    `active`        TINYINT(1) NOT NULL DEFAULT 0,
+    `started_by_citizenid` VARCHAR(50) NULL,
+    `updated_at`    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (`trap_house_id`),
+    CONSTRAINT `fk_matrix_packaging_room_state_trap_house`
+        FOREIGN KEY (`trap_house_id`) REFERENCES `matrix_trap_houses` (`id`)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
+
+
+SET FOREIGN_KEY_CHECKS = 1;
+
+
+-- =====================================================================
+-- DOĞRULAMA SORGUSU (opsiyonel — bu dosya çalıştırıldıktan sonra 3 dönmeli)
+-- =====================================================================
+-- SELECT COUNT(*) AS layer6_table_count
+-- FROM information_schema.tables
+-- WHERE table_schema = DATABASE()
+--   AND table_name IN (
+--       'matrix_door_reinforcement',
+--       'matrix_rendezvous_events',
+--       'matrix_packaging_room_state'
+--   );
+
+
+-- =====================================================================
+-- BAKIM: Yalnızca bu migrasyonun eklediği 3 tabloyu geri almak isterseniz
+-- (matrix.sql/layer5_ultimate.sql'e DOKUNMAZ). Yorumdan çıkarıp çalıştırın.
+-- =====================================================================
+-- SET FOREIGN_KEY_CHECKS = 0;
+-- DROP TABLE IF EXISTS `matrix_packaging_room_state`;
+-- DROP TABLE IF EXISTS `matrix_rendezvous_events`;
+-- DROP TABLE IF EXISTS `matrix_door_reinforcement`;
+-- SET FOREIGN_KEY_CHECKS = 1;
+
+
+-- =======================================================================
+-- ★ KAYNAK: sql/layer7_faz1.sql (orijinal icerik, birebir asagida, hicbir satir atlanmadi)
+-- =======================================================================
+
+-- =====================================================================
+-- KATMAN 7 [T4] FAZ 1: OTONOM DEPO LOJISTIGI VE BURO KILIDI
+-- Additive migration. Yukaridaki (matrix.sql / layer5_ultimate.sql /
+-- layer6_trap_house.sql) hicbir tablosu/alani DEGISTIRILMEDI -- her
+-- ifade IF NOT EXISTS ile guvenlidir.
+--
+-- ★ KAPSAM NOTU: 'matrix_trap_stash' burada BULUNMUYOR -- trap house'un
+-- ortak deposu zaten server/logistics.lua ve server/main.lua'nin
+-- matrix_trap_stash_<id> ox_inventory stash'i (RegisterStash/AddItem/
+-- RemoveItem) olarak MEVCUT. Ikinci bir SQL tablosu acmak veri
+-- tutarsizligina yol acardi.
+-- =====================================================================
+
+-- ---------------------------------------------------------------------
+-- Kalici Kolektif Ogrenme Hafizasi -- trap house basina, RAID'LERDE
+-- SIFIRLANMAYAN, birikimli telsiz ihlali + ele gecirilen urun saflik
+-- kaydi. server/bureau.lua [T4] blogunun Buro Kilidi (lockdown_active)
+-- karari BU tablodan turer; matrix_bureau_intel (mevcut) ile KARISTIRILMAZ
+-- -- o yalnizca heat/triangulation/pattern yogunlugu tasir.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `matrix_bureau_learning_core` (
+    `id`                          INT      NOT NULL AUTO_INCREMENT,
+    `trap_house_id`               INT      NOT NULL,
+    `frequent_zones`              TEXT     NULL COMMENT 'JSON array: bu trap house icin tekrarlanan ihlal etiketleri',
+    `radio_breach_count`          INT      NOT NULL DEFAULT 0,
+    `average_purity_intercepted`  FLOAT    NOT NULL DEFAULT 0.0 COMMENT '[0,1] olcek, matrix_kitchen_batches.output_purity ile ayni',
+    `purity_sample_count`         INT      NOT NULL DEFAULT 0 COMMENT 'average_purity_intercepted hareketli ortalamasinin kendi bagimsiz sayaci',
+    `lockdown_active`             TINYINT(1) NOT NULL DEFAULT 0,
+    `updated_at`                  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `uq_matrix_learning_core_trap_house` (`trap_house_id`),
+    CONSTRAINT `fk_matrix_learning_core_trap_house`
+        FOREIGN KEY (`trap_house_id`) REFERENCES `matrix_trap_houses` (`id`)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
+
+-- ---------------------------------------------------------------------
+-- Toplu Satis Hub'lari (District Distribution Hubs) -- F10 ile kritik
+-- kavsaklara atanan, trap house'un ortak deposundan (matrix_trap_stash_
+-- <id>) sabit miktarli/RNG'siz toplu satis dongusu yuruten dugumler.
+-- `locked`, server/bureau.lua [T4]'un 'matrix:internal:bureauLockdown'
+-- yayinindan senkronize edilir (server/district_hubs.lua).
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `matrix_district_hubs` (
+    `id`             INT          NOT NULL AUTO_INCREMENT,
+    `trap_house_id`  INT          NOT NULL,
+    `label`          VARCHAR(100) NOT NULL,
+    `coord_x`        FLOAT        NOT NULL,
+    `coord_y`        FLOAT        NOT NULL,
+    `coord_z`        FLOAT        NOT NULL,
+    `active`         TINYINT(1)   NOT NULL DEFAULT 1,
+    `locked`         TINYINT(1)   NOT NULL DEFAULT 0,
+    `created_at`     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    KEY `idx_matrix_district_hubs_trap_house` (`trap_house_id`),
+    CONSTRAINT `fk_matrix_district_hubs_trap_house`
+        FOREIGN KEY (`trap_house_id`) REFERENCES `matrix_trap_houses` (`id`)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
+
+
+-- =======================================================================
+-- ★ KAYNAK: sql/layer7_faz3.sql (orijinal icerik, birebir asagida, hicbir satir atlanmadi)
+-- =======================================================================
+
+-- =====================================================================
+-- KATMAN 7 [T4] FAZ 3: OX_TARGET SOKAK DEVSIRME KOPRUSU
+-- Additive migration. Yukaridaki (matrix.sql / layer5_ultimate.sql /
+-- layer6_trap_house.sql / layer7_faz1.sql) hicbir tablosu/alani
+-- DEGISTIRILMEDI -- ayni disiplin, yeni bir ALTER TABLE.
+--
+-- loyalty_base: [0,1] olcek, diger psychology alanlari (resilience,
+-- snitch_tendency, ...) ILE AYNI sekilde matrix_bots'a eklenir.
+-- server/recruitment.lua Matrix.Recruitment.RecruitStreetNpc'nin
+-- ustunde calistigi TEK psikoloji semasi budur -- ikinci bir tablo
+-- ACILMAZ. Varsayilan 0.5 (mevcut resilience/cognitive_shifter
+-- varsayilanlariyla AYNI taban); yalnizca Ox_Target "Kadroya Kat"
+-- devsirmesi (server/market.lua, /sokakdevsir test komutu ile AYNI
+-- disiplin) bunu acikca 1.0 (mutlak sadik) yazar.
+--
+-- NOT: `ADD COLUMN IF NOT EXISTS`, MySQL 8.0.29+ / MariaDB 10.0+
+-- gerektirir (oxmysql'in desteklediği surumlerin tamami bunu karsilar).
+-- =====================================================================
+ALTER TABLE `matrix_bots`
+    ADD COLUMN IF NOT EXISTS `loyalty_base` FLOAT NOT NULL DEFAULT 0.5
+        COMMENT '[0,1]; Ox_Target ile devsirilen ajanlar 1.0 (mutlak sadik) alir'
+        AFTER `snitch_tendency`;
+
+
+-- =======================================================================
+-- ★ KAYNAK: sql/matrix_security_hardening.sql (orijinal icerik, birebir asagida, hicbir satir atlanmadi)
+-- =======================================================================
+
+-- =====================================================================
+-- MATRIX SECURITY HARDENING PATCH / sql/matrix_security_hardening.sql
+--
+-- Bu migration, server/blackmarket.lua + server/bureau.lua ADLİ GÜVENLİK
+-- DENETİMİ (7 maddelik zafiyet raporu) sonucu eklenen TEK yeni tabloyu
+-- taşır: [SEC-2] "Hard Drop-Out / Orphan State" düzeltmesinin son çare
+-- (son-kertede) tahsilat defteri.
+--
+-- matrix.sql'in KENDİSİ değiştirilmedi (mevcut şemaya elle dokunmak
+-- riskli) -- bu proje layer5_ultimate.sql / layer6_trap_house.sql /
+-- layer7_faz1.sql / layer7_faz3.sql ile AYNI "ek (additive) migration"
+-- disiplinini izler. matrix.sql'den (veya son layer dosyasından) SONRA,
+-- FOREIGN_KEY_CHECKS zaten 1'e dönmüş haldeyken import edilmelidir.
+--
+-- NOT: bu dosya "layer8" olarak ADLANDIRILMADI -- matrix.sql'in kendi
+-- yorumunda KATMAN 8 zaten "Hard-Wipe / E_total" adlı, henüz tanımsız ve
+-- BİLİNÇLİ OLARAK ertelenmiş ayrı bir özelliğe ayrılmış. Bu dosya o
+-- katmanla KARIŞTIRILMASIN diye bağımsız bir isim taşır.
+-- =====================================================================
+
+
+-- ---------------------------------------------------------------------
+-- ★ [SEC-2] Offline İade Son Çare Defteri
+--
+-- RefundCash (server/blackmarket.lua) şu sırayla dener:
+--   1) Oyuncu çevrimiçiyse: Matrix.QBX Functions.AddMoney (anında).
+--   2) Değilse: players.money JSON_SET ile ACID tek-UPDATE offline iade.
+--   3) O UPDATE 0 satır etkilerse (citizenid players'ta yok -- silinmiş/
+--      tanınmayan karakter): bu tabloya yazılır. Para HİÇBİR KOŞULDA
+--      sessizce kaybolmaz; bir admin bu tabloyu görüp manuel mutabakat
+--      yapabilir. Asla otomatik silinmez/işlenmez (yalnızca INSERT).
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `matrix_pending_refunds` (
+    `id`          INT          NOT NULL AUTO_INCREMENT,
+    `citizenid`   VARCHAR(50)  NOT NULL,
+    `amount`      DECIMAL(12,2) NOT NULL,
+    `reason`      VARCHAR(100) NOT NULL,
+    `resolved`    TINYINT(1)   NOT NULL DEFAULT 0,
+    `resolved_by` VARCHAR(50)  DEFAULT NULL,
+    `resolved_at` DATETIME     DEFAULT NULL,
+    `created_at`  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    KEY `idx_matrix_pending_refunds_citizenid` (`citizenid`),
+    KEY `idx_matrix_pending_refunds_resolved` (`resolved`)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
+
+
+-- =======================================================================
+-- ★ KAYNAK: sql/matrix_cctv_network.sql (orijinal icerik, birebir asagida, hicbir satir atlanmadi)
+-- =======================================================================
+
+-- =====================================================================
+-- MATRIX CCTV NETWORK PATCH / sql/matrix_cctv_network.sql
+--
+-- Bu migration, server/forensics.lua ★ [OPSEC FAZ 1 EK] FİZİKSEL VE SİBER
+-- DELİL İMHA MEKANİZMASI (Matrix.Forensics.HackCCTVNetwork) için TEK yeni
+-- tabloyu taşır. matrix.sql'in (veya son layer/hardening dosyasının)
+-- KENDİSİ değiştirilmedi -- bu proje layer5_ultimate.sql / layer6_trap_
+-- house.sql / layer7_faz1.sql / layer7_faz3.sql / matrix_security_
+-- hardening.sql İLE AYNI "ek (additive) migration" disiplinini izler.
+-- matrix.sql'den (veya son migration dosyasından) SONRA, FOREIGN_KEY_CHECKS
+-- zaten 1'e dönmüş haldeyken import edilmelidir.
+--
+-- ★ KAPSAM NOTU: bu migration YALNIZCA HackCCTVNetwork'ün SİLDİĞİ tabloyu
+-- tanımlar. Mobese ağının oyuncu/bot kıyafet eşleşmesini GERÇEKTEN nasıl
+-- TESPİT EDİP bu tabloya YAZACAĞI (bir algılama/computer-vision motoru)
+-- bu görevin kapsamı DIŞINDADIR -- Config.AI_Matrix_Brain'in "altyapı
+-- hazır, motor gelecekte devreye girer" (enabled=false) köprüsüyle AYNI
+-- bilinçli erteleme. server/forensics.lua'daki /cctvkaydet test komutu,
+-- gerçek bir algılama motoru olmadan bu tabloyu manuel doldurmak için
+-- (bkz. server/bureau.lua /dropsizintiekle İLE AYNI "test-veri-ekleme"
+-- disiplini) eklendi.
+-- =====================================================================
+
+
+-- ---------------------------------------------------------------------
+-- Mobese Dağıtım Kutusu Kayıtları — bölge başına, zaman damgalı kıyafet/
+-- maskeleme eşleşme günlüğü. HackCCTVNetwork yalnızca `masked = 0`
+-- (maskesiz/şüpheli) VE son 30 dakika içindeki satırları siler; maskeli
+-- (masked = 1) satırlar veya 30 dakikadan eski satırlar HİÇ ETKİLENMEZ.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `matrix_cctv_logs` (
+    `id`           INT          NOT NULL AUTO_INCREMENT,
+    `zone_id`      INT          NOT NULL,
+    `dna_id`       VARCHAR(64)  NOT NULL,
+    `masked`       TINYINT(1)   NOT NULL DEFAULT 0,
+    `clothing_tag` VARCHAR(64)  NOT NULL DEFAULT 'unknown',
+    `created_at`   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    KEY `idx_matrix_cctv_logs_zone_time` (`zone_id`, `created_at`)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
+
+
+-- =====================================================================
+-- DOĞRULAMA SORGUSU (opsiyonel — bu dosya çalıştırıldıktan sonra 1 dönmeli)
+-- =====================================================================
+-- SELECT COUNT(*) AS matrix_cctv_network_table_count
+-- FROM information_schema.tables
+-- WHERE table_schema = DATABASE()
+--   AND table_name IN ('matrix_cctv_logs');
+
+
+-- =====================================================================
+-- BAKIM: Yalnızca bu migrasyonun eklediği tabloyu geri almak isterseniz.
+-- Yorumdan çıkarıp çalıştırın.
+-- =====================================================================
+-- DROP TABLE IF EXISTS `matrix_cctv_logs`;

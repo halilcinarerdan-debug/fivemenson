@@ -1600,7 +1600,7 @@ end
 -- Config.Market.Zones id-uzayı, YENİ bir bölge kavramı İCAT EDİLMEZ)
 -- mobese dağıtım kutularına sızar; başarılı tetiklenmede o bölgedeki son
 -- 30 dakikaya ait MASKESİZ/ŞÜPHELİ kıyafet eşleşme geçmişini
--- (matrix_cctv_logs, bkz. sql/matrix_cctv_network.sql) siler. Maskeli
+-- (matrix_cctv_logs, bkz. sql/matrix_financial_core.sql) siler. Maskeli
 -- (zaten gizlenmiş) veya 30 dakikadan eski kayıtlara DOKUNULMAZ.
 -- =====================================================================
 function Matrix.Forensics.HackCCTVNetwork(actorRef, zoneId)
