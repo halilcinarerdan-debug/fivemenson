@@ -1889,15 +1889,21 @@ RegisterKeyMapping('notdefteri', 'Operasyon Not Defterini Ac (F10 disinda dogrud
 -- sunucu deterministik Conviction Weight'i günceller. Yeni bir HUD/NUI
 -- paneli ÜRETİLMEZ -- yalnızca lib.alertDialog/lib.registerContext/
 -- lib.inputDialog (ZATEN VAR olan ox_lib bağımlılığı) kullanılır.
-local function OpenTrialEvidenceMenu(trialId, dnaId)
-    local rows = lib.callback.await('matrix:callback:trialEvidence', false, dnaId)
+-- ★ [KATMAN 14] Artık sunucudan trialId ile (dnaId DEĞİL) sorgulanır --
+-- server/bureau.lua Matrix.Bureau.GetEvidenceLinesForDefendant balistik/
+-- adli VE ALPR/legal-plaka kanıtlarını BİRLEŞTİRİP döner, her satır bir
+-- `kind` taşır ('forensic'|'alpr') -- bu, İtiraf/İnkar seçiminde AYNEN
+-- geri sunucuya gönderilir ki doğru tablo sorgulansın.
+local function OpenTrialEvidenceMenu(trialId)
+    local rows = lib.callback.await('matrix:callback:trialEvidence', false, trialId)
     local options = {}
     if type(rows) == 'table' then
         for _, ev in ipairs(rows) do
             options[#options + 1] = {
-                title       = ('Kanit #%d [%s] Eslesme:%.3f'):format(ev.id, tostring(ev.evidence_type), tonumber(ev.match_certainty) or 0.0),
+                title       = ('[%s] Kanit #%d [%s] Eslesme:%.3f'):format(
+                    ev.kind == 'alpr' and 'ALPR' or 'ADLI', ev.id, tostring(ev.evidence_type), tonumber(ev.match_certainty) or 0.0),
                 description = (ev.sealed_as_crime_weapon == 1) and 'MUHURLU -- Buro bu kanita zaten guveniyor' or 'muhurlenmemis',
-                icon        = 'gavel',
+                icon        = (ev.kind == 'alpr') and 'car' or 'gavel',
                 onSelect    = function()
                     local choice = lib.alertDialog({
                         header  = ('Kanit #%d - Ifade'):format(ev.id),
@@ -1907,7 +1913,7 @@ local function OpenTrialEvidenceMenu(trialId, dnaId)
                         labels   = { confirm = 'ITIRAF EDIYORUM', cancel = 'INKAR EDIYORUM' }
                     })
                     local response = (choice == 'confirm') and 'confess' or 'deny'
-                    local ok, result = lib.callback.await('matrix:callback:trialSubmit', false, trialId, ev.id, response)
+                    local ok, result = lib.callback.await('matrix:callback:trialSubmit', false, trialId, ev.kind or 'forensic', ev.id, response)
 
                     if ok and type(result) == 'table' then
                         lib.notify({
@@ -1920,14 +1926,14 @@ local function OpenTrialEvidenceMenu(trialId, dnaId)
                     end
 
                     if not (ok and result and result.verdict_reached) then
-                        OpenTrialEvidenceMenu(trialId, dnaId)
+                        OpenTrialEvidenceMenu(trialId)
                     end
                 end
             }
         end
     end
     if #options == 0 then
-        options[#options + 1] = { title = 'Bu DNA icin kanit bulunamadi.', disabled = true, icon = 'circle-info' }
+        options[#options + 1] = { title = 'Bu sanik icin kanit bulunamadi.', disabled = true, icon = 'circle-info' }
     end
 
     lib.registerContext({
@@ -1953,7 +1959,7 @@ local function OpenTrialDialog()
         return
     end
 
-    OpenTrialEvidenceMenu(trialId, input[2])
+    OpenTrialEvidenceMenu(trialId)
 end
 
 

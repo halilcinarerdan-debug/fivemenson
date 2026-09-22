@@ -324,6 +324,29 @@ end)
 AddCheck('kanca mevcut: Matrix.Bureau.RequestTrialNarrative (AI koprusu)', function()
     return type(Matrix.Bureau) == 'table' and type(Matrix.Bureau.RequestTrialNarrative) == 'function', 'kanca'
 end)
+-- ★ KATMAN 14 regresyon korumaları
+AddCheck('kanca mevcut: Matrix.Bureau.ProcessLegalPlateALPR', function()
+    return type(Matrix.Bureau) == 'table' and type(Matrix.Bureau.ProcessLegalPlateALPR) == 'function', 'kanca'
+end)
+AddCheck('kanca mevcut: Matrix.Bureau.GetEvidenceLinesForDefendant', function()
+    return type(Matrix.Bureau) == 'table' and type(Matrix.Bureau.GetEvidenceLinesForDefendant) == 'function', 'kanca'
+end)
+AddCheck('SubmitTestimonyClaim var olmayan dava icin guvenle hata donuyor (crash yok)', function()
+    -- Gercek bir dava/kanit olusturmadan (yan etki YOK) -- var olmayan bir
+    -- trialId ile cagirir, pcall'in hic PATLAMAMASINI ve temiz bir
+    -- 'bad_trial' donusunu dogrular.
+    if type(Matrix.Bureau.SubmitTestimonyClaim) ~= 'function' then return false, 'kanca yok' end
+    local ok, success, reason = pcall(Matrix.Bureau.SubmitTestimonyClaim, -999999, 'forensic', 1, 'deny')
+    return ok and success == false and reason == 'bad_trial', tostring(reason)
+end)
+AddCheck('Bureau.Trial.HighCertaintyThreshold ALPR match_certainty=1.0 icin YALAN sayimini garanti eder', function()
+    -- matrix_legal_plate_evidence.match_certainty HER ZAMAN 1.0 yazilir
+    -- (bkz. ProcessLegalPlateALPR) -- bu, 1.0 > HighCertaintyThreshold
+    -- oldugunu (yani "deny" HER ZAMAN yalan sayilacagini) yapisal olarak
+    -- dogrular.
+    return 1.0 > Config.Bureau.Trial.HighCertaintyThreshold, ('esik=%.2f'):format(Config.Bureau.Trial.HighCertaintyThreshold)
+end)
+
 AddCheck('AI_Matrix_Brain.enabled=false iken RequestTrialNarrative guvenle atlanir', function()
     -- Bu kontrol AI cagrisini TETIKLEMEZ -- yalnizca guard mantiginin
     -- (ExecuteVerdict icindeki Config.AI_Matrix_Brain.enabled kontrolu)
@@ -433,6 +456,9 @@ local DbChecks = {
     end },
     { 'matrix_player_state.imprisoned kolonu mevcut (FAZ3)', function()
         return ColumnExists('matrix_player_state', 'imprisoned'), 'sql/matrix_financial_core.sql calistirildi mi?'
+    end },
+    { 'matrix_legal_plate_evidence tablosu mevcut (KATMAN 14)', function()
+        return TableExists('matrix_legal_plate_evidence'), 'sql/matrix_financial_core.sql calistirildi mi?'
     end }
 }
 

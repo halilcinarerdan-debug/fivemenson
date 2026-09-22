@@ -2972,6 +2972,51 @@ function Matrix.Bureau.GetEvidenceLinesForDna(dnaId)
 end
 
 
+-- ★ [KATMAN 14] Bir davanın TÜM kanıt satırlarını (balistik/adli +
+-- ALPR/legal-plaka) TEK bir normalize edilmiş listede birleştirir --
+-- GetEvidenceLinesForDna'nın (yukarıda, DEĞİŞTİRİLMEDİ) YERİNE GEÇMEZ,
+-- onun üzerine BİR KATMAN ekler. Her satır `kind` taşır ('forensic'|'alpr')
+-- -- client/hud.lua bunu SubmitTestimonyClaim'e AYNEN geri gönderir ki
+-- sunucu doğru tabloyu sorgulasın.
+function Matrix.Bureau.GetEvidenceLinesForDefendant(trialId)
+    local trial = activeTrials[tonumber(trialId) or -1]
+    if not trial then return {} end
+
+    local merged = {}
+
+    for _, row in ipairs(Matrix.Bureau.GetEvidenceLinesForDna(trial.dna_id)) do
+        merged[#merged + 1] = {
+            kind                   = 'forensic',
+            id                     = row.id,
+            evidence_type          = row.evidence_type,
+            match_certainty        = row.match_certainty,
+            sealed_as_crime_weapon = row.sealed_as_crime_weapon,
+            created_at             = row.created_at
+        }
+    end
+
+    if type(trial.defendant_ref) == 'string' and trial.defendant_ref ~= '' then
+        local plateRows = MySQL.query.await(
+            'SELECT id, plate, match_certainty, denied, created_at FROM matrix_legal_plate_evidence WHERE citizenid = ? ORDER BY id DESC LIMIT 20',
+            { trial.defendant_ref }
+        ) or {}
+        for _, row in ipairs(plateRows) do
+            merged[#merged + 1] = {
+                kind                   = 'alpr',
+                id                     = row.id,
+                evidence_type          = ('legal_plate_alpr(%s)'):format(row.plate),
+                match_certainty        = row.match_certainty,
+                sealed_as_crime_weapon = 1,
+                denied                 = row.denied == 1,
+                created_at             = row.created_at
+            }
+        end
+    end
+
+    return merged
+end
+
+
 function Matrix.Bureau.OpenTrial(src, defendantRef, dnaId)
     if type(defendantRef) ~= 'string' or defendantRef == '' then return nil, 'bad_defendant' end
     if not nextTrialId then return nil, 'not_ready' end
@@ -3003,19 +3048,44 @@ end
 --   'confess' (kesinlik farketmeksizin) -> itirafın kendisi suçu doğrular,
 --     AYNI geometrik artışla yükselir, ama YALAN SAYILMAZ (lie_count ARTMAZ).
 --   'deny' VE düşük-kesinlik -> makul şüpheden yararlanma -> weight AZALIR.
-function Matrix.Bureau.SubmitTestimonyClaim(trialId, evidenceId, response)
+-- ★ [KATMAN 14] `evidenceKind` OPSİYONELDİR ('forensic' varsayılan -- ESKİ
+-- tüm çağrı yerleri, matrix_forensic_evidence'tan okumaya devam eder,
+-- davranış BİREBİR ESKİSİ GİBİDİR). 'alpr' verilirse matrix_legal_plate_
+-- evidence'tan okur -- talep: "Bu kanıt inkar edilirse ... Conviction
+-- Weight üssel patlatılarak %100 ... DOĞRUDAN tetiklenmelidir" -- ALPR
+-- plaka eşleşmesi veritabanı-kesin bir kanıttır (match_certainty=1.0,
+-- itiraz edilemez), bu yüzden İNKAR ('deny') GEOMETRİK adım yerine
+-- DOĞRUDAN conviction_weight=1.0'a sıçrar (talebin kendisi "üssel
+-- patlatma"yı ZATEN sonsuz büyüklükte bir adım olarak tarif ediyor).
+function Matrix.Bureau.SubmitTestimonyClaim(trialId, evidenceKind, evidenceId, response)
+    evidenceKind = evidenceKind or 'forensic'
+
     local trial = activeTrials[tonumber(trialId) or -1]
     if not trial or trial.verdict ~= 'pending' then return false, 'bad_trial' end
     if response ~= 'confess' and response ~= 'deny' then return false, 'bad_response' end
+    if evidenceKind ~= 'forensic' and evidenceKind ~= 'alpr' then return false, 'bad_kind' end
 
-    local rows = MySQL.query.await('SELECT match_certainty FROM matrix_forensic_evidence WHERE id = ?', { tonumber(evidenceId) }) or {}
-    local certainty = rows[1] and tonumber(rows[1].match_certainty)
+    local certainty, alprRow
+    if evidenceKind == 'alpr' then
+        local rows = MySQL.query.await('SELECT * FROM matrix_legal_plate_evidence WHERE id = ?', { tonumber(evidenceId) }) or {}
+        alprRow = rows[1]
+        certainty = alprRow and tonumber(alprRow.match_certainty)
+    else
+        local rows = MySQL.query.await('SELECT match_certainty FROM matrix_forensic_evidence WHERE id = ?', { tonumber(evidenceId) }) or {}
+        certainty = rows[1] and tonumber(rows[1].match_certainty)
+    end
     if not certainty then return false, 'bad_evidence' end
 
     local highCertainty = certainty > Config.Bureau.Trial.HighCertaintyThreshold
     local lied = false
 
-    if response == 'deny' and highCertainty then
+    if evidenceKind == 'alpr' and response == 'deny' then
+        -- ★ DOĞRUDAN PATLAMA: geometrik adım YOK, tavana ANINDA sıçrar.
+        lied = true
+        trial.lie_count = trial.lie_count + 1
+        trial.conviction_weight = 1.0
+        MySQL.prepare('UPDATE matrix_legal_plate_evidence SET denied = 1 WHERE id = ?', { tonumber(evidenceId) })
+    elseif response == 'deny' and highCertainty then
         lied = true
         trial.lie_count = trial.lie_count + 1
         trial.conviction_weight = math_min(1.0,
@@ -3029,8 +3099,8 @@ function Matrix.Bureau.SubmitTestimonyClaim(trialId, evidenceId, response)
 
     dirtyTrials[trial.id] = true
 
-    Matrix.Log('BUREAU', '[FAZ3][MAHKEME] Dava #%d | Kanit #%s (kesinlik:%.3f) | Cevap:%s | Yalan:%s | Conviction:%.3f',
-        trial.id, tostring(evidenceId), certainty, response, tostring(lied), trial.conviction_weight)
+    Matrix.Log('BUREAU', '[FAZ3][MAHKEME] Dava #%d | Kanit[%s] #%s (kesinlik:%.3f) | Cevap:%s | Yalan:%s | Conviction:%.3f',
+        trial.id, evidenceKind, tostring(evidenceId), certainty, response, tostring(lied), trial.conviction_weight)
 
     local verdictReached = false
     if trial.conviction_weight >= Config.Bureau.Trial.ConvictionWipeThreshold then
@@ -3194,12 +3264,15 @@ lib.callback.register('matrix:callback:trialOpen', function(src, defendantRef, d
     return Matrix.Bureau.OpenTrial(src, defendantRef, dnaId)
 end)
 
-lib.callback.register('matrix:callback:trialEvidence', function(src, dnaId)
-    return Matrix.Bureau.GetEvidenceLinesForDna(dnaId)
+-- ★ [KATMAN 14] ARTIK trialId ALIR (eskiden dnaId) -- balistik/adli +
+-- ALPR/legal-plaka kanıtlarını BİRLEŞTİRİR (bkz. GetEvidenceLinesForDefendant).
+-- client/hud.lua da bu callback'i trialId ile çağıracak şekilde güncellendi.
+lib.callback.register('matrix:callback:trialEvidence', function(src, trialId)
+    return Matrix.Bureau.GetEvidenceLinesForDefendant(trialId)
 end)
 
-lib.callback.register('matrix:callback:trialSubmit', function(src, trialId, evidenceId, response)
-    return Matrix.Bureau.SubmitTestimonyClaim(trialId, evidenceId, response)
+lib.callback.register('matrix:callback:trialSubmit', function(src, trialId, evidenceKind, evidenceId, response)
+    return Matrix.Bureau.SubmitTestimonyClaim(trialId, evidenceKind, evidenceId, response)
 end)
 
 
@@ -3221,8 +3294,51 @@ RegisterCommand('davaac', function(src, args)
 end, false)
 
 exports('OpenTrial',             function(src, defendantRef, dnaId) return Matrix.Bureau.OpenTrial(src, defendantRef, dnaId) end)
-exports('SubmitTestimonyClaim',  function(trialId, evidenceId, response) return Matrix.Bureau.SubmitTestimonyClaim(trialId, evidenceId, response) end)
+exports('SubmitTestimonyClaim',  function(trialId, evidenceKind, evidenceId, response) return Matrix.Bureau.SubmitTestimonyClaim(trialId, evidenceKind, evidenceId, response) end)
 exports('GetEvidenceLinesForDna',function(dnaId) return Matrix.Bureau.GetEvidenceLinesForDna(dnaId) end)
+exports('GetEvidenceLinesForDefendant', function(trialId) return Matrix.Bureau.GetEvidenceLinesForDefendant(trialId) end)
+
+
+-- =====================================================================
+-- ★★★ KATMAN 14: MEET-POINT LEGAL ARAÇ ALPR DEŞİFRE KANCASI ★★★
+-- TAMAMEN YENİ bir EKLEMEDİR. server/rendezvous.lua'nın 'matrix:server:
+-- rendezvous:pickup' handler'ının (DEĞİŞTİRİLMEDİ, yalnızca guard'lı tek
+-- satırlık bir çağrı eklendi) her teslim alımında tetiklediği bir
+-- fonksiyondur.
+--
+-- MANTIK (RNG YOK): oyuncu teslim alırken bir aracın İÇİNDEYSE, o aracın
+-- plakası server/logistics.lua'nın KENDİ illegal filo tablosunda
+-- (matrix_fleet -- 'scratched'/'hot'/'factory' karaborsa kataloğu,
+-- DEĞİŞTİRİLMEDİ) KAYITLI DEĞİLSE, bu araç "legal galeriden alınmış resmi
+-- bir araç"tır -- Büro bunu doğrudan sanığın (o an içinde olduğu aracın
+-- sürücüsü = citizenid) mahkeme dosyasına adli delil olarak işler.
+-- =====================================================================
+function Matrix.Bureau.ProcessLegalPlateALPR(src, plate, trapHouseId)
+    if type(plate) ~= 'string' or plate == '' then return false end
+
+    local knownIllegal = MySQL.query.await('SELECT 1 FROM matrix_fleet WHERE plate = ? LIMIT 1', { plate }) or {}
+    if #knownIllegal > 0 then
+        -- Zaten bilinen (karaborsa/blackmarket) bir plaka -- "legal galeriden
+        -- alınmış resmi araç" TANIMINA uymuyor, ALPR sessizce atlanır.
+        return false
+    end
+
+    local playerState = Matrix.GetOrCreatePlayerState(src)
+    if not playerState or not playerState.citizenid then return false end
+
+    MySQL.insert([[
+        INSERT INTO matrix_legal_plate_evidence (plate, citizenid, dna_id, trap_house_id, match_certainty, created_at)
+        VALUES (?, ?, ?, ?, 1.0, NOW())
+    ]], { plate, playerState.citizenid, playerState.dna_id, trapHouseId })
+
+    Matrix.Log('BUREAU',
+        '[KATMAN14][ALPR] Meet-Point desifresi: plaka %s (legal/kayitsiz) -- sahip:%s (DNA:%s) -- mahkeme dosyasina adli delil olarak islendi.',
+        plate, playerState.citizenid, tostring(playerState.dna_id))
+
+    return true
+end
+
+exports('ProcessLegalPlateALPR', function(src, plate, trapHouseId) return Matrix.Bureau.ProcessLegalPlateALPR(src, plate, trapHouseId) end)
 
 
 -- =====================================================================

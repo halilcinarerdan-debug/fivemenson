@@ -1217,3 +1217,31 @@ ALTER TABLE `matrix_player_state`
 -- WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'matrix_player_state' AND COLUMN_NAME = 'imprisoned';
 
 
+-- =====================================================================
+-- ★★★ KATMAN 14: MEET-POINT LEGAL ARAÇ ALPR DEŞİFRE KANCASI ★★★
+-- YENİ tablo. matrix_forensic_evidence'a EKLENMEZ -- o tablonun
+-- `ballistic_id` kolonu matrix_ballistic_weapons'a FOREIGN KEY'lidir
+-- (yukarıda, DEĞİŞTİRİLMEDİ); bir plaka taramasını sahte bir "balistik
+-- kayıt" gibi oraya zorlamak o kısıtı ya ihlal eder ya da anlamsız bir
+-- balistik satırı İCAT ETMEYİ gerektirirdi. Bunun yerine BAĞIMSIZ, kendi
+-- adli kayıt disiplinine (asla silinmez) sahip bu tablo kullanılır --
+-- server/bureau.lua Matrix.Bureau.GetEvidenceLinesForDefendant bunu
+-- matrix_forensic_evidence ile BİRLEŞTİRİP mahkeme kanıt listesine ekler.
+-- =====================================================================
+CREATE TABLE IF NOT EXISTS `matrix_legal_plate_evidence` (
+    `id`               INT          NOT NULL AUTO_INCREMENT,
+    `plate`            VARCHAR(32)  NOT NULL,
+    `citizenid`        VARCHAR(50)  NOT NULL,
+    `dna_id`           VARCHAR(64)  NULL,
+    `trap_house_id`    INT          NULL,
+    `match_certainty`  FLOAT        NOT NULL DEFAULT 1.0,
+    `denied`           TINYINT(1)   NOT NULL DEFAULT 0,
+    `created_at`        DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    KEY `idx_matrix_legal_plate_evidence_citizenid` (`citizenid`),
+    KEY `idx_matrix_legal_plate_evidence_plate` (`plate`)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
+
+-- SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'matrix_legal_plate_evidence';
+
+

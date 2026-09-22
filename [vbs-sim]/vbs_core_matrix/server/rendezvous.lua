@@ -230,6 +230,30 @@ RegisterNetEvent('matrix:server:rendezvous:pickup', function(handoffId)
     end
 
 
+    -- ★ [KATMAN 14] MEET-POINT LEGAL ARAÇ ALPR DEŞİFRE KANCASI: oyuncu bir
+    -- aracın İÇİNDEYSE, plakası server/bureau.lua Matrix.Bureau.
+    -- ProcessLegalPlateALPR'a (guard'lı, DEĞİŞTİRİLMEMİŞ dosyalarda hiç
+    -- çağrılmaz) gönderilir -- o fonksiyon KENDİSİ karar verir (matrix_fleet
+    -- kaydı var mı yok mu). Bu satır teslimatın/pususun AKIŞINA HİÇ
+    -- KARIŞMAZ -- yalnızca SALT-OKUNUR bir gözlemcidir.
+    if Matrix.Bureau and Matrix.Bureau.ProcessLegalPlateALPR then
+        local vehicle = GetVehiclePedIsIn(ped, false)
+        if vehicle and vehicle ~= 0 then
+            local plate = GetVehicleNumberPlateText(vehicle)
+            if type(plate) == 'string' then
+                plate = plate:gsub('^%s+', ''):gsub('%s+$', '')
+                if plate ~= '' then
+                    local trapHouseIdForAlpr = FindNearestTrapHouse(handoff.coords)
+                    local ok, err = pcall(Matrix.Bureau.ProcessLegalPlateALPR, src, plate, trapHouseIdForAlpr)
+                    if not ok then
+                        Matrix.Log('RENDEZVOUS', '[HATA][KATMAN14] ProcessLegalPlateALPR cagrisi basarisiz (yutuldu): %s', tostring(err))
+                    end
+                end
+            end
+        end
+    end
+
+
     handoff.resolved = true
     PendingHandoffs[handoffId] = nil
     TriggerClientEvent('matrix:client:rendezvous:despawnSeller', src, handoffId)
