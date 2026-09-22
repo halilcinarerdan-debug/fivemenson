@@ -381,19 +381,19 @@ RegisterNetEvent('matrix:server:trapHouseInterior:giveItemToBot', function(botId
     local transferCount = math.min(count, tonumber(slotData.count) or 1)
 
 
-    local removeOk = pcall(function()
+    local removeOk, removed = pcall(function()
         return exports['ox_inventory']:RemoveItem(src, slotData.name, transferCount, nil, playerSlot)
     end)
-    if not removeOk then
+    if not removeOk or removed ~= true then
         Reply(src, 'Esya envanterinizden cikarilamadi.')
         return
     end
 
 
-    local addOk = pcall(function()
+    local addOk, added = pcall(function()
         return exports['ox_inventory']:AddItem(GetBotInventoryId(botId), slotData.name, transferCount, slotData.metadata)
     end)
-    if not addOk then
+    if not addOk or not added then
         -- Bota teslim edilemedi (bot envanteri dolu olabilir) — esyayi oyuncuya iade et.
         pcall(function() return exports['ox_inventory']:AddItem(src, slotData.name, transferCount, slotData.metadata) end)
         Reply(src, 'Bot envanteri dolu, teslimat iptal edildi ve esya size iade edildi.')
@@ -421,19 +421,19 @@ RegisterNetEvent('matrix:server:trapHouseInterior:transferBotToBot', function(fr
     end
 
 
-    local removeOk = pcall(function()
+    local removeOk, removed = pcall(function()
         return exports['ox_inventory']:RemoveItem(GetBotInventoryId(fromBotId), itemName, count)
     end)
-    if not removeOk then
+    if not removeOk or removed ~= true then
         Reply(src, ('Bot #%d envanterinde yeterli %s yok.'):format(fromBotId, itemName))
         return
     end
 
 
-    local addOk = pcall(function()
+    local addOk, added = pcall(function()
         return exports['ox_inventory']:AddItem(GetBotInventoryId(toBotId), itemName, count)
     end)
-    if not addOk then
+    if not addOk or not added then
         pcall(function() return exports['ox_inventory']:AddItem(GetBotInventoryId(fromBotId), itemName, count) end)
         Reply(src, ('Bot #%d envanteri dolu, aktarim iptal edildi.'):format(toBotId))
         return

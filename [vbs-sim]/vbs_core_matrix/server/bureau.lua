@@ -233,18 +233,22 @@ end
 -- boyunca dahi (RAM sıfırlansa da) her zaman GERÇEK toplam olay sayısını
 -- taşımaya devam eder -- LogPatternEvent'in ESKİ "her olayda +1" DB
 -- davranışıyla BİREBİR AYNI nihai sonuç, yalnızca toplu yazılır.
+-- ★ [SEC-6] RAM'deki dirty bayrağı ve flushedSnap SADECE MySQL.transaction.await
+-- BAŞARILI (true) döndüğünde güncellenir/sıfırlanır -- transaction sırasında
+-- (o milisaniyede) DB kesintiye uğrarsa hem 'dirty' bayrağı hem de flushedSnap
+-- RAM'de OLDUĞU GİBİ korunur ve bir sonraki döngüde aynı delta yeniden denenir.
 local function FlushDirtyPatternLog()
     local queries = {}
+    local pendingSnapUpdates = {}
+    local pendingClearIds = {}
+
+
     for trapHouseId in pairs(dirtyPatternLog) do
         local buckets = patternLog[trapHouseId]
         if buckets then
             local flushedSnap = patternLogFlushed[trapHouseId]
-            if not flushedSnap then
-                flushedSnap = {}
-                patternLogFlushed[trapHouseId] = flushedSnap
-            end
             for key, count in pairs(buckets) do
-                local already = flushedSnap[key] or 0
+                local already = (flushedSnap and flushedSnap[key]) or 0
                 local delta = count - already
                 if delta > 0 then
                     local wday, hour = key:match('^(%d+)_(%d+)$')
@@ -257,22 +261,37 @@ local function FlushDirtyPatternLog()
                             ]],
                             values = { trapHouseId, tonumber(wday), tonumber(hour), delta }
                         }
-                        flushedSnap[key] = count
+                        pendingSnapUpdates[#pendingSnapUpdates + 1] = { trapHouseId = trapHouseId, key = key, count = count }
                     end
                 end
             end
         end
-        dirtyPatternLog[trapHouseId] = nil
+        pendingClearIds[#pendingClearIds + 1] = trapHouseId
     end
 
 
-    if #queries == 0 then return end
+    if #queries == 0 then
+        for _, id in ipairs(pendingClearIds) do dirtyPatternLog[id] = nil end
+        return
+    end
 
 
     local ok, err = pcall(function() return MySQL.transaction.await(queries) end)
     if not ok or err == false then
-        Matrix.Log('BUREAU', '[HATA][SEC-5] FlushDirtyPatternLog transaction basarisiz (yutulmadi, log icin): %s', tostring(err))
+        Matrix.Log('BUREAU', '[HATA][SEC-5] FlushDirtyPatternLog transaction basarisiz (RAM bayraklari ve flushedSnap korundu, bir sonraki dongude tekrar denenecek): %s', tostring(err))
+        return
     end
+
+
+    for _, upd in ipairs(pendingSnapUpdates) do
+        local snap = patternLogFlushed[upd.trapHouseId]
+        if not snap then
+            snap = {}
+            patternLogFlushed[upd.trapHouseId] = snap
+        end
+        snap[upd.key] = upd.count
+    end
+    for _, id in ipairs(pendingClearIds) do dirtyPatternLog[id] = nil end
 end
 
 
@@ -322,6 +341,7 @@ end
 -- txAdmin:events:serverShuttingDown güvenlik ağıdır.
 local function FlushDirtyDecryption()
     local queries = {}
+    local pendingIds = {}
     for id in pairs(dirtyDecryption) do
         local h = Matrix.TrapHouses[id]
         if h then
@@ -329,14 +349,18 @@ local function FlushDirtyDecryption()
                 query  = 'UPDATE matrix_trap_houses SET decryption_confidence = ? WHERE id = ?',
                 values = { h.decryption_confidence, id }
             }
+            pendingIds[#pendingIds + 1] = id
+        else
+            dirtyDecryption[id] = nil
         end
-        dirtyDecryption[id] = nil
     end
     if #queries == 0 then return end
     local ok, err = pcall(function() return MySQL.transaction.await(queries) end)
     if not ok or err == false then
-        Matrix.Log('BUREAU', '[HATA][SEC-3] FlushDirtyDecryption transaction basarisiz (yutulmadi, log icin): %s', tostring(err))
+        Matrix.Log('BUREAU', '[HATA][SEC-3] FlushDirtyDecryption transaction basarisiz (RAM bayraklari korundu, bir sonraki dongude tekrar denenecek): %s', tostring(err))
+        return
     end
+    for _, id in ipairs(pendingIds) do dirtyDecryption[id] = nil end
 end
 
 
@@ -461,6 +485,7 @@ end
 -- ★ [SEC-3] bkz. FlushDirtyDecryption yorumu -- aynı batch+transaction disiplini.
 local function FlushDirtyIntel()
     local queries = {}
+    local pendingIds = {}
     for id in pairs(dirtyIntel) do
         local heat = cyberLeakHeatmap[id] or 0.0
         queries[#queries + 1] = {
@@ -471,13 +496,15 @@ local function FlushDirtyIntel()
             ]],
             values = { id, heat }
         }
-        dirtyIntel[id] = nil
+        pendingIds[#pendingIds + 1] = id
     end
     if #queries == 0 then return end
     local ok, err = pcall(function() return MySQL.transaction.await(queries) end)
     if not ok or err == false then
-        Matrix.Log('BUREAU', '[HATA][SEC-3] FlushDirtyIntel transaction basarisiz (yutulmadi, log icin): %s', tostring(err))
+        Matrix.Log('BUREAU', '[HATA][SEC-3] FlushDirtyIntel transaction basarisiz (RAM bayraklari korundu, bir sonraki dongude tekrar denenecek): %s', tostring(err))
+        return
     end
+    for _, id in ipairs(pendingIds) do dirtyIntel[id] = nil end
 end
 
 
@@ -1341,9 +1368,11 @@ end)
 -- ★ [SEC-3] bkz. FlushDirtyDecryption yorumu -- aynı batch+transaction disiplini.
 local function FlushDirtyLearningCore()
     local queries = {}
+    local pendingIds = {}
     for trapHouseId in pairs(dirtyLearningCore) do
         local state = learningCore[trapHouseId]
         if state then
+            pendingIds[#pendingIds + 1] = trapHouseId
             queries[#queries + 1] = {
                 query = [[
                     INSERT INTO matrix_bureau_learning_core
@@ -1366,14 +1395,17 @@ local function FlushDirtyLearningCore()
                     state.lockdown_active and 1 or 0
                 }
             }
+        else
+            dirtyLearningCore[trapHouseId] = nil
         end
-        dirtyLearningCore[trapHouseId] = nil
     end
     if #queries == 0 then return end
     local ok, err = pcall(function() return MySQL.transaction.await(queries) end)
     if not ok or err == false then
-        Matrix.Log('BUREAU', '[HATA][SEC-3] FlushDirtyLearningCore transaction basarisiz (yutulmadi, log icin): %s', tostring(err))
+        Matrix.Log('BUREAU', '[HATA][SEC-3] FlushDirtyLearningCore transaction basarisiz (RAM bayraklari korundu, bir sonraki dongude tekrar denenecek): %s', tostring(err))
+        return
     end
+    for _, id in ipairs(pendingIds) do dirtyLearningCore[id] = nil end
 end
 
 

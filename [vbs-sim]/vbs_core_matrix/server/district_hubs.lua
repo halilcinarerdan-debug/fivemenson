@@ -66,15 +66,33 @@ CreateThread(function()
     Matrix.DistrictHubs.LoadHubs()
 end)
 
+-- ★ [SEC-6] N ayrı fire-and-forget MySQL.prepare yerine TEK bir
+-- MySQL.transaction.await (atomik commit, bureau.lua'daki FlushDirty*
+-- ailesi ILE AYNI disiplin). RAM'deki 'dirty' bayrağı SADECE transaction
+-- başarılı (true) döndüğünde sıfırlanır -- kesinti olursa bayrak RAM'de
+-- korunur ve bir sonraki döngüde tekrar denenir.
 local function FlushDirtyHubs()
+    local queries = {}
+    local pendingIds = {}
     for id in pairs(dirtyHubs) do
         local hub = Hubs[id]
         if hub then
-            MySQL.prepare('UPDATE matrix_district_hubs SET active = ?, locked = ? WHERE id = ?',
-                { hub.active and 1 or 0, hub.locked and 1 or 0, id })
+            queries[#queries + 1] = {
+                query  = 'UPDATE matrix_district_hubs SET active = ?, locked = ? WHERE id = ?',
+                values = { hub.active and 1 or 0, hub.locked and 1 or 0, id }
+            }
+            pendingIds[#pendingIds + 1] = id
+        else
+            dirtyHubs[id] = nil
         end
-        dirtyHubs[id] = nil
     end
+    if #queries == 0 then return end
+    local ok, err = pcall(function() return MySQL.transaction.await(queries) end)
+    if not ok or err == false then
+        Matrix.Log('DISTRICT_HUB', '[HATA] FlushDirtyHubs transaction basarisiz (RAM bayraklari korundu, bir sonraki dongude tekrar denenecek): %s', tostring(err))
+        return
+    end
+    for _, id in ipairs(pendingIds) do dirtyHubs[id] = nil end
 end
 
 CreateThread(function()
@@ -223,10 +241,10 @@ local function ProcessHubDemandCycle(hubId, hub)
 
     for _, item in pairs(inv.items) do
         if type(item) == 'table' and type(item.name) == 'string' and (tonumber(item.count) or 0) >= batchGrams then
-            local removeOk = pcall(function()
+            local removeOk, removed = pcall(function()
                 return exports['ox_inventory']:RemoveItem(stashId, item.name, batchGrams, item.metadata)
             end)
-            if removeOk then
+            if removeOk and removed == true then
                 local proceeds = batchGrams * (Config.Market.StreetBasePricePerGram or 20.0)
                 Matrix.CashDecay.Deposit(hub.trap_house_id, proceeds)
                 Matrix.Log('DISTRICT_HUB', 'Hub #%d (trap #%d, %s) toplu satis: %s x%d, ciro=%.1f (kirli nakite eklendi).',

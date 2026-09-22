@@ -179,6 +179,78 @@ AddCheck('Matrix.Clamp referans-seffafligi (determinizm)', function()
 end)
 
 -- ---------------------------------------------------------------------
+-- ★ [SEC] HIZLI KATMAN: VERİ KARARLILIĞI / KOD SIKILAŞTIRMA REGRESYON
+-- BEKÇİLERİ -- hiçbir gerçek yol ÇAĞRILMAZ (SIFIR yan etki, dosya başı
+-- KAPSAM KARARI'yla aynı disiplin); yalnızca resource'un KENDİ kaynak
+-- metni (LoadResourceFile, salt-okunur) belirli sıkılaştırma imzalarını
+-- taşıyıp taşımadığı denetlenir. Biri bu revizyonu sessizce geri alırsa
+-- (ör. 'removed == true' şartını kaldırırsa) bu bekçiler kırmızı yanar.
+-- ---------------------------------------------------------------------
+local function ReadOwnSource(relativePath)
+    local ok, content = pcall(LoadResourceFile, GetCurrentResourceName(), relativePath)
+    if not ok or type(content) ~= 'string' or content == '' then return nil end
+    return content
+end
+
+local function SourceContainsAll(relativePath, needles)
+    local content = ReadOwnSource(relativePath)
+    if not content then return false, ('%s okunamadi (LoadResourceFile)'):format(relativePath) end
+    for _, needle in ipairs(needles) do
+        if not content:find(needle, 1, true) then
+            return false, ('%s icinde beklenen imza yok: %s'):format(relativePath, needle)
+        end
+    end
+    return true, ('%s dogrulandi (%d imza)'):format(relativePath, #needles)
+end
+
+AddCheck('SEC-1: RemoveItem cift dogrulama kilidi (logistics.lua)', function()
+    return SourceContainsAll('server/logistics.lua', {
+        'removeOk, removed = pcall',
+        'removed == true',
+    })
+end)
+
+AddCheck('SEC-1: RemoveItem cift dogrulama kilidi (trap_house_interior.lua)', function()
+    return SourceContainsAll('server/trap_house_interior.lua', {
+        'removeOk, removed = pcall',
+        'removed ~= true',
+    })
+end)
+
+AddCheck('SEC-2: CollectShells atomik silme-once-sonra-uret sirasi (forensics.lua)', function()
+    local content = ReadOwnSource('server/forensics.lua')
+    if not content then return false, 'server/forensics.lua okunamadi' end
+    local deletePos = content:find("MySQL.query.await('DELETE FROM matrix_forensic_evidence WHERE id = ?'", 1, true)
+    local addPos    = content:find('AddItem(inventoryId, Config.Forensics.ShellCasingEvidenceItem', 1, true)
+    if not deletePos or not addPos then return false, 'DELETE/AddItem imzalari bulunamadi' end
+    if deletePos > addPos then return false, 'AddItem, atomik DELETE.await SONUCUNDAN ONCE calisiyor' end
+    return true, 'DELETE.await -> AddItem sirasi dogru'
+end)
+
+AddCheck('SEC-4: WipeBallisticRecord tek transaction altinda (forensics.lua)', function()
+    return SourceContainsAll('server/forensics.lua', {
+        'function Matrix.Forensics.WipeBallisticRecord',
+        'MySQL.transaction.await({',
+    })
+end)
+
+AddCheck('SEC-3: FlushDirty* ailesi bayrak/transaction sirasi (bureau.lua)', function()
+    return SourceContainsAll('server/bureau.lua', {
+        'for _, id in ipairs(pendingIds) do dirtyDecryption[id] = nil end',
+        'for _, id in ipairs(pendingIds) do dirtyIntel[id] = nil end',
+        'for _, id in ipairs(pendingIds) do dirtyLearningCore[id] = nil end',
+        'for _, id in ipairs(pendingClearIds) do dirtyPatternLog[id] = nil end',
+    })
+end)
+
+AddCheck('SEC-3: FlushDirtyHubs atomik transaction + gecikmeli bayrak (district_hubs.lua)', function()
+    return SourceContainsAll('server/district_hubs.lua', {
+        'MySQL.transaction.await(queries)',
+        'for _, id in ipairs(pendingIds) do dirtyHubs[id] = nil end',
+    })
+end)
+
+-- ---------------------------------------------------------------------
 -- HIZLI KATMAN: MATRIX.* KANCA VARLIĞI (kanca KAYMASINI -- var olması
 -- beklenen bir fonksiyonun sessizce yok olmasını -- yakalar). HİÇBİRİ
 -- ÇAĞRILMAZ, yalnızca `type(...) == 'function'` kontrol edilir.
@@ -204,7 +276,13 @@ local RequiredHooks = {
     { 'Matrix.Forensics.InspectPlayer',        Matrix.Forensics and Matrix.Forensics.InspectPlayer },
     { 'Matrix.Forensics.InspectBustedBot',     Matrix.Forensics and Matrix.Forensics.InspectBustedBot },
     { 'Matrix.Kitchen.ProcessCook',            Matrix.Kitchen and Matrix.Kitchen.ProcessCook },
-    { 'Matrix.Kitchen.GetEffectiveSkill',      Matrix.Kitchen and Matrix.Kitchen.GetEffectiveSkill }
+    { 'Matrix.Kitchen.GetEffectiveSkill',      Matrix.Kitchen and Matrix.Kitchen.GetEffectiveSkill },
+    -- ★ [SEC] Veri Kararliligi/Kod Sikilastirma revizyonunun dayandigi kancalar.
+    { 'Matrix.Logistics.DispatchAmmoRun',      Matrix.Logistics and Matrix.Logistics.DispatchAmmoRun },
+    { 'Matrix.Logistics.OnAmmoRunArrived',     Matrix.Logistics and Matrix.Logistics.OnAmmoRunArrived },
+    { 'Matrix.Logistics.LoadTrunkFromStash',   Matrix.Logistics and Matrix.Logistics.LoadTrunkFromStash },
+    { 'Matrix.Forensics.CollectShells',        Matrix.Forensics and Matrix.Forensics.CollectShells },
+    { 'Matrix.Forensics.WipeBallisticRecord',  Matrix.Forensics and Matrix.Forensics.WipeBallisticRecord }
 }
 
 for _, entry in ipairs(RequiredHooks) do

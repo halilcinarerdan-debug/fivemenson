@@ -509,8 +509,18 @@ function Matrix.Forensics.WipeBallisticRecord(weaponSerial)
     WearRetryQueue[ballisticId] = nil
 
 
-    MySQL.prepare('DELETE FROM matrix_forensic_evidence WHERE ballistic_id = ?', { ballisticId })
-    MySQL.prepare('DELETE FROM matrix_ballistic_weapons WHERE ballistic_id = ?', { ballisticId })
+    -- ★ [SEC] İki bağımsız asenkron DELETE yerine TEK bir MySQL.transaction.await
+    -- (deadlock korumalı, atomik commit) -- ya iki tablo da silinir ya da hiçbiri.
+    local ok, err = pcall(function()
+        return MySQL.transaction.await({
+            { query = 'DELETE FROM matrix_forensic_evidence WHERE ballistic_id = ?', values = { ballisticId } },
+            { query = 'DELETE FROM matrix_ballistic_weapons WHERE ballistic_id = ?',  values = { ballisticId } },
+        })
+    end)
+    if not ok or err == false then
+        Matrix.Log('FORENSICS', '[HATA] WipeBallisticRecord transaction basarisiz: %s', tostring(err))
+        return false
+    end
 
 
     Matrix.Log('FORENSICS', '[BURO KORLESTIRILDI] Namlu degisimi: %s balistik kaydi tamamen silindi.', ballisticId)
@@ -1548,15 +1558,23 @@ function Matrix.Forensics.CollectShells(botId, coords)
     local inventoryId = ('dealer_%d'):format(bot.id)
     local collectedCount = 0
     for _, row in ipairs(matched) do
-        local addOk = pcall(function()
-            return exports['ox_inventory']:AddItem(inventoryId, Config.Forensics.ShellCasingEvidenceItem, 1, {
-                ballistic_id = row.ballistic_id,
-                description  = ('[TOPLANMIS KOVAN]\nBalistik ID: %s\nAdli kayit fiziksel olarak imha edildi.'):format(row.ballistic_id)
-            })
+        -- ★ [SEC] Önce atomik DB DELETE (await): satır zaten silinmişse
+        -- (ör. iki hızlı tetiklemenin yarış durumu) affectedRows=0 döner ve
+        -- bu kovan için ASLA envanter eşyası üretilmez -- kopyalama önlenir.
+        local delOk, affectedRows = pcall(function()
+            return MySQL.query.await('DELETE FROM matrix_forensic_evidence WHERE id = ?', { row.id })
         end)
-        if addOk then
-            MySQL.prepare('DELETE FROM matrix_forensic_evidence WHERE id = ?', { row.id })
-            collectedCount = collectedCount + 1
+        local deleted = delOk and (tonumber(affectedRows) or 0) > 0
+        if deleted then
+            local addOk = pcall(function()
+                return exports['ox_inventory']:AddItem(inventoryId, Config.Forensics.ShellCasingEvidenceItem, 1, {
+                    ballistic_id = row.ballistic_id,
+                    description  = ('[TOPLANMIS KOVAN]\nBalistik ID: %s\nAdli kayit fiziksel olarak imha edildi.'):format(row.ballistic_id)
+                })
+            end)
+            if addOk then
+                collectedCount = collectedCount + 1
+            end
         end
     end
     if collectedCount == 0 then return false, 'inventory_full' end

@@ -1124,14 +1124,14 @@ function Matrix.Logistics.DispatchAmmoRun(sourceBotId, targetBotId, dispatcherSr
 
     local pulled = {}
     for _, entry in ipairs(Config.Logistics.AmmoRunManifest) do
-        local removeOk = pcall(function()
+        local removeOk, removed = pcall(function()
             return exports['ox_inventory']:RemoveItem(stashId, entry.item, entry.count)
         end)
-        if removeOk then
-            local addOk = pcall(function()
+        if removeOk and removed == true then
+            local addOk, added = pcall(function()
                 return exports['ox_inventory']:AddItem(inventoryId, entry.item, entry.count)
             end)
-            if addOk then
+            if addOk and added then
                 pulled[#pulled + 1] = ('%sx%d'):format(entry.item, entry.count)
             else
                 -- Bota eklenemedi (envanter dolu) -- depoya iade et.
@@ -1203,12 +1203,19 @@ function Matrix.Logistics.OnAmmoRunArrived(sourceBotId, targetBotId, arrivalCoor
     if invOk and type(inv) == 'table' and type(inv.items) == 'table' then
         for slot, item in pairs(inv.items) do
             if type(item) == 'table' and type(item.name) == 'string' and (tonumber(item.count) or 0) > 0 then
-                local addOk = pcall(function()
-                    return exports['ox_inventory']:AddItem(toInv, item.name, item.count, item.metadata)
+                local removeOk, removed = pcall(function()
+                    return exports['ox_inventory']:RemoveItem(fromInv, item.name, item.count, item.metadata, slot)
                 end)
-                if addOk then
-                    pcall(function() exports['ox_inventory']:RemoveItem(fromInv, item.name, item.count, item.metadata, slot) end)
-                    movedAny = true
+                if removeOk and removed == true then
+                    local addOk, added = pcall(function()
+                        return exports['ox_inventory']:AddItem(toInv, item.name, item.count, item.metadata)
+                    end)
+                    if addOk and added then
+                        movedAny = true
+                    else
+                        -- Hedefe eklenemedi (envanter dolu) -- kaynak bota asenkron olarak iade et.
+                        pcall(function() exports['ox_inventory']:AddItem(fromInv, item.name, item.count, item.metadata) end)
+                    end
                 end
             end
         end
@@ -1317,12 +1324,12 @@ function Matrix.Logistics.LoadTrunkFromStash(botId, itemName, count)
     if have < count then return false, 'insufficient_stash' end
 
 
-    local removeOk = pcall(function() return exports['ox_inventory']:RemoveItem(stashId, itemName, count) end)
-    if not removeOk then return false, 'remove_failed' end
+    local removeOk, removed = pcall(function() return exports['ox_inventory']:RemoveItem(stashId, itemName, count) end)
+    if not removeOk or removed ~= true then return false, 'remove_failed' end
 
 
-    local addOk = pcall(function() return exports['ox_inventory']:AddItem(trunkId, itemName, count) end)
-    if not addOk then
+    local addOk, added = pcall(function() return exports['ox_inventory']:AddItem(trunkId, itemName, count) end)
+    if not addOk or not added then
         -- Best-effort telafi: aktarilamayan miktar depoya geri iade edilir.
         pcall(function() exports['ox_inventory']:AddItem(stashId, itemName, count) end)
         return false, 'add_failed'
