@@ -194,6 +194,45 @@ local DEALER_PED_MODEL_HASH = GetHashKey(DEALER_PED_MODEL_NAME)
 
 
 -- =====================================================================
+-- ★ [KATMAN 15] DETERMİNİSTİK ROL-HAVUZU PED SEÇİCİSİ -- HAZIR AMA
+-- KASITLI OLARAK BAĞLANMAMIŞ bir yardımcı fonksiyon.
+--
+-- ★ DÜRÜST TASARIM KARARI: shared/config.lua'daki Config.RoleModels artık
+-- her rol için bir MODEL HAVUZU taşıyor (talep: "torbacı/keş spawn
+-- havuzlarını genişlet"). Bu fonksiyon o havuzdan, koordinat-checksum'lu
+-- (math.random YOK) deterministik bir seçim yapar VE TAM ÇALIŞIR/TEST
+-- EDİLEBİLİR durumdadır (bkz. matrix_diagnostics.lua). AMA hemen
+-- YUKARIDAKİ [H14] KRİTİK ANTI-CRASH GUARD yorumunun KENDİSİ açıkça
+-- şunu söylüyor: "Rol bazlı Config.RoleModels/Config.DefaultRoleModel
+-- zincirine KASITLI olarak HİÇ başvurulmaz — ciddiyetsiz/uygunsuz skin
+-- fallback'ini kökten engeller." Bu, GEÇMİŞTE YAŞANMIŞ, belgelenmiş bir
+-- crash'in düzeltmesidir. Bu fonksiyonu gerçek dealer/dispatch spawn
+-- hattına (DEALER_PED_MODEL_HASH'in kullanıldığı yerler) BAĞLAMAK o
+-- düzeltmeyi GERİ ALIRDI -- bu yüzden BİLEREK YAPILMADI. Fonksiyon,
+-- gelecekte bilinçli bir "çoklu-model spawn" kararı alınırsa hazır ve
+-- test edilmiş halde burada bekler.
+-- =====================================================================
+local function ChecksumOf(raw, salt)
+    local sum = salt or 0
+    for i = 1, #raw do
+        sum = (sum * 31 + raw:byte(i)) % 2147483647
+    end
+    return sum
+end
+
+function Matrix.GetDeterministicPedModel(role, coords)
+    local pool = Config.RoleModels and Config.RoleModels[role]
+    if type(pool) ~= 'table' or #pool == 0 then return Config.DefaultRoleModel end
+    if #pool == 1 then return pool[1] end
+
+    local raw = ('%s|%.2f|%.2f|%.2f'):format(role, coords and coords.x or 0.0, coords and coords.y or 0.0, coords and coords.z or 0.0)
+    local sum = ChecksumOf(raw, 17)
+    local index = (sum % #pool) + 1
+    return pool[index]
+end
+
+
+-- =====================================================================
 -- CORE MATHEMATICS
 -- =====================================================================
 function Matrix.Log(tag, fmt, ...)

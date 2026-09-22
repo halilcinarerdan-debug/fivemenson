@@ -170,11 +170,19 @@ Config.Player = {
 }
 
 
+-- ★ [KATMAN 15] Her rol artık TEK bir string değil bir MODEL HAVUZUDUR --
+-- server/main.lua Matrix.GetDeterministicPedModel(role, coords) buradan
+-- koordinat-checksum'lu, RNG'siz bir seçim yapar (bkz. o fonksiyonun
+-- yorumu -- ve KASITLI OLARAK canlı dealer/dispatch spawn hattına
+-- BAĞLANMADIĞINI açıklayan dürüst tasarım notu).
+-- `Config.RoleModels[role]` TRUTHY kontrolü (main.lua /botyarat komutu,
+-- DEĞİŞTİRİLMEDİ) tablo mu string mi olduğuna bakmaz -- geriye dönük
+-- uyumlu.
 Config.RoleModels = {
-    dealer  = 's_m_y_dealer_01',
-    runner  = 'a_m_y_runner_01',
-    lookout = 'a_m_y_skater_01',
-    cooking = 's_m_m_chemsec_01'
+    dealer  = { 's_m_y_dealer_01', 'g_m_y_ballaeast_01', 'g_m_y_vagos_01' },
+    runner  = { 'a_m_y_runner_01', 'a_m_m_mexcntry_01' },
+    lookout = { 'a_m_y_skater_01', 'g_m_y_ballaeast_01' },
+    cooking = { 's_m_m_chemsec_01' }
 }
 Config.DefaultRoleModel = 's_m_y_dealer_01'
 
@@ -1237,5 +1245,12 @@ Config.Bureau.Trial = {
     -- Bu tavan ASLA DEĞİŞMEZ (talep: "%100'de kilitlenecek").
     ConvictionWipeThreshold = 1.0
 }
+
+-- =====================================================================
+-- ★★★ KATMAN 15: SAHA GÖZ HİZASI KİMLİK TARAYICI ★★★
+-- client/hud.lua'nın raycast tabanlı odak-ped taramasının menzili (metre).
+-- Yalnızca Taktik HUD (F6) AÇIKKEN çalışır -- 0 Resmon bütçesi korunur.
+-- ---------------------------------------------------------------------
+Config.Hud.FocusScanRangeMeters = 15.0
 
 return Config

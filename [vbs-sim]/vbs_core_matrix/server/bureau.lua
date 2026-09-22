@@ -3342,6 +3342,55 @@ exports('ProcessLegalPlateALPR', function(src, plate, trapHouseId) return Matrix
 
 
 -- =====================================================================
+-- ★★★ KATMAN 15: SAHA GÖZ HİZASI KİMLİK TARAYICI -- SUNUCU ÇÖZÜMLEYİCİ ★★★
+-- TAMAMEN YENİ bir EKLEMEDİR. client/hud.lua'nın raycast'i bir ped BULUR ve
+-- (maske KONTROLÜ zaten client-tarafı tamamlanmış olarak, bkz. o dosyanın
+-- yorumu) NetworkID'sini gönderir -- bu callback SALT-OKUNUR olarak
+-- Matrix.Bots'ta o NetworkID'ye sahip botu arar (O(N), N küçük -- yeni bir
+-- netId->botId ters-indeks İCAT EDİLMEZ, mevcut projede benzer taramalar
+-- zaten aynı disiplinde yapılıyor, bkz. district_hubs.lua IsTrapHouseLeader).
+-- =====================================================================
+function Matrix.Bureau.IdentifyFocusedPed(src, netId)
+    netId = tonumber(netId)
+    if not netId then return { identified = false, threat = false } end
+
+    local botId, bot = nil, nil
+    for id, b in pairs(Matrix.Bots or {}) do
+        if b.state and b.state.net_id == netId then
+            botId, bot = id, b
+            break
+        end
+    end
+
+    if not botId then
+        return { identified = false, threat = false }
+    end
+
+    -- Kural 2: bu bot, lideri düşüp PARÇALANMIŞ (Matrix.DistrictHubs.
+    -- FragmentTerritory, DEĞİŞTİRİLMEDİ) bir trap house'a hâlâ bağlıysa,
+    -- artık kontrolsüz/düşman bir unsurdur.
+    local threat = false
+    if Matrix.DistrictHubs and Matrix.DistrictHubs.IsTrapHouseFragmented then
+        local ok, result = pcall(Matrix.DistrictHubs.IsTrapHouseFragmented, bot.state.trap_house_id)
+        threat = ok and result or false
+    end
+
+    return {
+        identified = true,
+        threat     = threat,
+        name       = bot.name,
+        dna_id     = bot.dna_id
+    }
+end
+
+lib.callback.register('matrix:callback:identifyFocusedPed', function(src, netId)
+    return Matrix.Bureau.IdentifyFocusedPed(src, netId)
+end)
+
+exports('IdentifyFocusedPed', function(src, netId) return Matrix.Bureau.IdentifyFocusedPed(src, netId) end)
+
+
+-- =====================================================================
 -- ★★★ [FAZ 2] KATMAN 3: ON-DEMAND DISPATCH TAARRUZİ SİNYAL KAYBI
 -- (FAIL-SAFE PROTOCOL) ★★★
 -- TAMAMEN YENİ bir EKLEMEDİR. server/main.lua'nın Matrix.CompleteDispatch/

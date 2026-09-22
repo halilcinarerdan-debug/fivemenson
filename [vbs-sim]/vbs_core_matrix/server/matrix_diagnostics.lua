@@ -347,6 +347,66 @@ AddCheck('Bureau.Trial.HighCertaintyThreshold ALPR match_certainty=1.0 icin YALA
     return 1.0 > Config.Bureau.Trial.HighCertaintyThreshold, ('esik=%.2f'):format(Config.Bureau.Trial.HighCertaintyThreshold)
 end)
 
+-- ★ KATMAN 15 regresyon korumaları
+AddCheck('Config.RoleModels tum rol havuzlari gecerli (bos degil, string listesi)', function()
+    if type(Config.RoleModels) ~= 'table' then return false, 'Config.RoleModels tanimsiz' end
+    for role, pool in pairs(Config.RoleModels) do
+        if type(pool) ~= 'table' or #pool == 0 then
+            return false, ('%s icin havuz bos/gecersiz'):format(tostring(role))
+        end
+        for i, model in ipairs(pool) do
+            if type(model) ~= 'string' or model == '' then
+                return false, ('%s havuzu[%d] gecersiz model adi'):format(tostring(role), i)
+            end
+        end
+    end
+    return true, 'tum havuzlar gecerli'
+end)
+AddCheck('kanca mevcut: Matrix.GetDeterministicPedModel', function()
+    return type(Matrix.GetDeterministicPedModel) == 'function', 'kanca'
+end)
+AddCheck('GetDeterministicPedModel deterministik (RNG YOK -- ayni girdi ayni cikti)', function()
+    if type(Matrix.GetDeterministicPedModel) ~= 'function' then return false, 'kanca yok' end
+    local coords = vector3(123.456, -789.012, 34.5)
+    local ok1, a = pcall(Matrix.GetDeterministicPedModel, 'dealer', coords)
+    local ok2, b = pcall(Matrix.GetDeterministicPedModel, 'dealer', coords)
+    if not ok1 or not ok2 then return false, 'cagri hata verdi' end
+    if type(a) ~= 'string' or a == '' then return false, 'gecersiz model donduruldu' end
+    return a == b, ('%s == %s'):format(tostring(a), tostring(b))
+end)
+AddCheck('GetDeterministicPedModel Config.RoleModels havuzunun DISINA CIKMIYOR', function()
+    if type(Matrix.GetDeterministicPedModel) ~= 'function' then return false, 'kanca yok' end
+    for role, pool in pairs(Config.RoleModels) do
+        local poolSet = {}
+        for _, m in ipairs(pool) do poolSet[m] = true end
+        -- Birkac farkli koordinat ile ornekle -- havuzun HER zaman icinde kalmali.
+        for i = 1, 5 do
+            local coords = vector3(i * 111.0, i * -222.0, i * 3.0)
+            local ok, model = pcall(Matrix.GetDeterministicPedModel, role, coords)
+            if not ok or not poolSet[model] then
+                return false, ('%s icin havuz disi model: %s'):format(role, tostring(model))
+            end
+        end
+    end
+    return true, 'tum roller havuz sinirlari icinde'
+end)
+AddCheck('kanca mevcut: Matrix.DistrictHubs.IsTrapHouseFragmented', function()
+    return type(Matrix.DistrictHubs) == 'table' and type(Matrix.DistrictHubs.IsTrapHouseFragmented) == 'function', 'kanca'
+end)
+AddCheck('kanca mevcut: Matrix.Bureau.IdentifyFocusedPed', function()
+    return type(Matrix.Bureau) == 'table' and type(Matrix.Bureau.IdentifyFocusedPed) == 'function', 'kanca'
+end)
+AddCheck('IdentifyFocusedPed bilinmeyen NetworkID icin guvenle identified=false donuyor', function()
+    if type(Matrix.Bureau.IdentifyFocusedPed) ~= 'function' then return false, 'kanca yok' end
+    local ok, result = pcall(Matrix.Bureau.IdentifyFocusedPed, 0, -999999)
+    if not ok or type(result) ~= 'table' then return false, 'cagri hata verdi' end
+    return result.identified == false and result.threat == false, 'identified=false, threat=false'
+end)
+AddCheck('Config.Hud.FocusScanRangeMeters gecerli', function()
+    local r = Config.Hud.FocusScanRangeMeters
+    return type(r) == 'number' and r > 0, tostring(r)
+end)
+
 AddCheck('AI_Matrix_Brain.enabled=false iken RequestTrialNarrative guvenle atlanir', function()
     -- Bu kontrol AI cagrisini TETIKLEMEZ -- yalnizca guard mantiginin
     -- (ExecuteVerdict icindeki Config.AI_Matrix_Brain.enabled kontrolu)

@@ -469,6 +469,22 @@ function Matrix.DistrictHubs.OnGangLeaderEliminated(botId, trapHouseId, cause)
 end
 
 
+-- ★ [KATMAN 15 KÖPRÜSÜ] server/bureau.lua'nın 'matrix:callback:
+-- identifyFocusedPed' kancasının (client/hud.lua Saha Göz Hizası Kimlik
+-- Tarayıcı) "bu bot agresif bir slime hücresinin eski bölgesinde mi
+-- dolaşıyor" kontrolü için salt-okunur getter.
+function Matrix.DistrictHubs.IsTrapHouseFragmented(trapHouseId)
+    trapHouseId = tonumber(trapHouseId)
+    if not trapHouseId then return false end
+    for _, cell in pairs(SplinterCells) do
+        if cell.active and cell.origin_trap_house_id == trapHouseId then
+            return true
+        end
+    end
+    return false
+end
+
+
 -- "Pusu ve siber sızıntı döngüsü": aynı bölgede (zone_id) aktif bir OYUNCU
 -- trap house'u varsa, rakip hücre rekabeti azaltmak için Büro'ya ihbar eder
 -- -- MEVCUT Matrix.Bureau.TriggerPropaganda/RecordRadioBreach (server/

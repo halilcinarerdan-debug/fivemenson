@@ -68,6 +68,12 @@ local MAX_WAYPOINT_LEN = (Config.Hud and Config.Hud.MaxWaypointInputLength) or 6
 local WEAPON_EVAC_MS = ((Config.Forensics and Config.Forensics.WeaponEvacuationSeconds) or 6) * 1000
 
 
+-- ★ [KATMAN 15] SAHA GÖZ HİZASI KİMLİK TARAYICI sabitleri -- WEAPON_UNARMED_
+-- HASH İLE AYNI "bir kez hesapla, module-level cache'le" deseni.
+local FOCUS_SCAN_RANGE_M     = (Config.Hud and Config.Hud.FocusScanRangeMeters) or 15.0
+local FEDERAL_AGENT_MODEL_HASH = GetHashKey((Config.Rendezvous and Config.Rendezvous.AmbushPedModel) or 's_m_y_swat_01')
+
+
 local function DrawMonoLine(x, y, text, r, g, b, scale)
     SetTextFont(4)
     SetTextProportional(1)
@@ -2092,6 +2098,88 @@ RegisterKeyMapping('taktikmenu', 'Taktik Komuta Menusunu Ac', 'keyboard', 'F10')
 
 
 -- =====================================================================
+-- ★★★ KATMAN 15: SAHA GÖZ HİZASI KİMLİK TARAYICI ★★★
+-- TAMAMEN YENİ bir EKLEMEDİR. client/trap_house_client.lua'ya HİÇ
+-- DOKUNULMAZ. [E1] SIFIR SAYI STANDARDI İLE AYNI disiplin: raycast/native
+-- okuma VE metin-üretimi bu YAVAŞ tarama thread'inde yapılır, render
+-- thread'i (aşağıda) yalnızca hazır `focusedIdentityText`'i çizer.
+-- =====================================================================
+local focusedIdentityText  = nil
+local focusedIdentityColor = COLOR_VALUE
+
+local function RotationToDirection(rot)
+    local z = math.rad(rot.z)
+    local x = math.rad(rot.x)
+    local num = math.abs(math.cos(x))
+    return vector3(-math.sin(z) * num, math.cos(z) * num, math.sin(x))
+end
+
+local function GetFocusedPed()
+    local playerPed = PlayerPedId()
+    local camCoords  = GetGameplayCamCoord()
+    local camRot     = GetGameplayCamRot(2)
+    local direction  = RotationToDirection(camRot)
+    local dest = camCoords + (direction * FOCUS_SCAN_RANGE_M)
+
+    local ray = StartShapeTestRay(camCoords.x, camCoords.y, camCoords.z, dest.x, dest.y, dest.z, 12, playerPed, 0)
+    local _, hit, _, _, entityHit = GetShapeTestResult(ray)
+    if hit == 1 and entityHit ~= 0 and DoesEntityExist(entityHit) and IsEntityAPed(entityHit) and entityHit ~= playerPed then
+        return entityHit
+    end
+    return nil
+end
+
+CreateThread(function()
+    while true do
+        if not hudActive then
+            focusedIdentityText = nil
+            Wait(500)
+        else
+            local ped = GetFocusedPed()
+            if not ped then
+                focusedIdentityText = nil
+            else
+                -- Kural 1: maske kontrolu TAMAMEN CLIENT-TARAFI (server
+                -- round-trip GEREKMEZ -- ped modeli zaten client'ta yuklu).
+                local masked = GetPedDrawableVariation(ped, 1) > 0
+                if masked then
+                    focusedIdentityText  = '[KIMLIK: DESIFRE EDILEMEDI - MASKE AKTIF]'
+                    focusedIdentityColor = COLOR_DIM
+                elseif GetEntityModel(ped) == FEDERAL_AGENT_MODEL_HASH then
+                    -- Kural 2a: federal ajan (Buro pususu ped modeli, Config.
+                    -- Rendezvous.AmbushPedModel ILE AYNI -- yeni bir model
+                    -- kaydi ICAT EDILMEZ) -- server round-trip GEREKMEZ.
+                    focusedIdentityText  = '[ANOMALI: TEHDIT UNSURU]'
+                    focusedIdentityColor = COLOR_DANGER
+                else
+                    local netId = NetworkGetNetworkIdFromEntity(ped)
+                    local ok, result = pcall(function()
+                        return lib.callback.await('matrix:callback:identifyFocusedPed', false, netId)
+                    end)
+                    if ok and type(result) == 'table' and result.identified then
+                        if result.threat then
+                            -- Kural 2b: lideri dusup parcalanmis bir bolgenin
+                            -- artik kontrolsuz botu.
+                            focusedIdentityText  = '[ANOMALI: TEHDIT UNSURU]'
+                            focusedIdentityColor = COLOR_DANGER
+                        else
+                            -- Kural 3: temiz/maskesiz, deterministik cozulen kimlik.
+                            focusedIdentityText  = ('[SIBER-KIMLIK: %s | DNA:%s]'):format(
+                                tostring(result.name or '?'), tostring(result.dna_id or '?'))
+                            focusedIdentityColor = COLOR_VALUE
+                        end
+                    else
+                        focusedIdentityText = nil
+                    end
+                end
+            end
+            Wait(400)
+        end
+    end
+end)
+
+
+-- =====================================================================
 -- RENDER THREAD — HUD kapalıyken Wait(500) (neredeyse 0ms), açıkken
 -- Wait(0) (DrawText'in gerektirdiği per-frame çağrı). Metin dönüşümü
 -- render thread'inde YAPILMAZ (bkz. [E1]) — burada yalnızca hazır string
@@ -2114,6 +2202,15 @@ CreateThread(function()
                     DrawMonoLine(x, y, line.text or '', color[1], color[2], color[3], line.header and 0.30 or 0.28)
                     y = y + 0.021
                 end
+            end
+
+
+            -- ★ [KATMAN 15]: goz hizasi kimlik bulteni, ekranin ortasina
+            -- yakin (crosshair altina) cizilir -- ana HUD panelinden AYRI,
+            -- "neye baktigin" bulteni.
+            if focusedIdentityText then
+                DrawMonoLine(0.36, 0.60, focusedIdentityText,
+                    focusedIdentityColor[1], focusedIdentityColor[2], focusedIdentityColor[3], 0.34)
             end
 
 
