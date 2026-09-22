@@ -251,42 +251,42 @@ local DbChecks = {
     end },
     { 'matrix_bots tablosu mevcut', function() return TableExists('matrix_bots'), 'INFORMATION_SCHEMA.TABLES' end },
     { 'matrix_bots.loyalty_base kolonu mevcut (Madde 4 migration)', function()
-        return ColumnExists('matrix_bots', 'loyalty_base'), 'sql/layer7_faz3.sql calistirildi mi?'
+        return ColumnExists('matrix_bots', 'loyalty_base'), 'sql/matrix_financial_core.sql calistirildi mi?'
     end },
-    { 'matrix_bureau_learning_core tablosu mevcut', function() return TableExists('matrix_bureau_learning_core'), 'sql/layer7_faz1.sql' end },
-    { 'matrix_district_hubs tablosu mevcut', function() return TableExists('matrix_district_hubs'), 'sql/layer7_faz1.sql' end },
+    { 'matrix_bureau_learning_core tablosu mevcut', function() return TableExists('matrix_bureau_learning_core'), 'sql/matrix_financial_core.sql' end },
+    { 'matrix_district_hubs tablosu mevcut', function() return TableExists('matrix_district_hubs'), 'sql/matrix_financial_core.sql' end },
 
     -- =================================================================
     -- ★ REGRESYON: 9 GERI ENJEKTE EDILEN HAYATI DB KONTROLU (HIGH)
-    -- sql/layer_regression_schema.sql calistirilmadan bu 9 kontrol
+    -- sql/matrix_financial_core.sql calistirilmadan bu 9 kontrol
     -- BASARISIZ doner -- muhurleme barajini kasitli olarak yukari tirmandirir.
     -- =================================================================
     { 'matrix_zone_ledger.dirty_cash_pool kolonu mevcut', function()
-        return ColumnExists('matrix_zone_ledger', 'dirty_cash_pool'), 'sql/layer_regression_schema.sql calistirildi mi?'
+        return ColumnExists('matrix_zone_ledger', 'dirty_cash_pool'), 'sql/matrix_financial_core.sql calistirildi mi?'
     end },
     { 'matrix_bots.accounting_precision kolonu mevcut', function()
-        return ColumnExists('matrix_bots', 'accounting_precision'), 'sql/layer_regression_schema.sql calistirildi mi?'
+        return ColumnExists('matrix_bots', 'accounting_precision'), 'sql/matrix_financial_core.sql calistirildi mi?'
     end },
     { 'matrix_zone_inspectors.is_wiped kolonu mevcut', function()
-        return ColumnExists('matrix_zone_inspectors', 'is_wiped'), 'sql/layer_regression_schema.sql calistirildi mi?'
+        return ColumnExists('matrix_zone_inspectors', 'is_wiped'), 'sql/matrix_financial_core.sql calistirildi mi?'
     end },
     { 'matrix_purchase_logs tablosu mevcut', function()
-        return TableExists('matrix_purchase_logs'), 'sql/layer_regression_schema.sql calistirildi mi?'
+        return TableExists('matrix_purchase_logs'), 'sql/matrix_financial_core.sql calistirildi mi?'
     end },
     { 'matrix_customer_pool.is_dead kolonu mevcut', function()
-        return ColumnExists('matrix_customer_pool', 'is_dead'), 'sql/layer_regression_schema.sql calistirildi mi?'
+        return ColumnExists('matrix_customer_pool', 'is_dead'), 'sql/matrix_financial_core.sql calistirildi mi?'
     end },
     { 'matrix_gang_learning_core tablosu mevcut', function()
-        return TableExists('matrix_gang_learning_core'), 'sql/layer_regression_schema.sql calistirildi mi?'
+        return TableExists('matrix_gang_learning_core'), 'sql/matrix_financial_core.sql calistirildi mi?'
     end },
     { 'matrix_trial_records tablosu mevcut', function()
-        return TableExists('matrix_trial_records'), 'sql/layer_regression_schema.sql calistirildi mi?'
+        return TableExists('matrix_trial_records'), 'sql/matrix_financial_core.sql calistirildi mi?'
     end },
     { 'matrix_player_state.imprisoned kolonu mevcut', function()
-        return ColumnExists('matrix_player_state', 'imprisoned'), 'sql/layer_regression_schema.sql calistirildi mi?'
+        return ColumnExists('matrix_player_state', 'imprisoned'), 'sql/matrix_financial_core.sql calistirildi mi?'
     end },
     { 'matrix_legal_plate_evidence tablosu mevcut (KATMAN 14)', function()
-        return TableExists('matrix_legal_plate_evidence'), 'sql/layer_regression_schema.sql calistirildi mi?'
+        return TableExists('matrix_legal_plate_evidence'), 'sql/matrix_financial_core.sql calistirildi mi?'
     end }
 }
 
